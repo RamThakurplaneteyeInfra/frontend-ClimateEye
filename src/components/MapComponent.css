@@ -1,0 +1,103 @@
+.map-container {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f5f5f5;
+}
+
+.leaflet-map {
+  background: #f5f5f5;
+}
+
+/* Light theme for Leaflet controls */
+.leaflet-container {
+  background: #f5f5f5;
+  color: #333333;
+}
+
+.leaflet-control-zoom {
+  border: 1px solid rgba(20, 184, 166, 0.3) !important;
+  background: rgba(255, 255, 255, 0.95) !important;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
+}
+
+.leaflet-control-zoom a {
+  background: rgba(255, 255, 255, 0.9) !important;
+  color: #14b8a6 !important;
+  border: 1px solid rgba(20, 184, 166, 0.3) !important;
+}
+
+.leaflet-control-zoom a:hover {
+  background: rgba(20, 184, 166, 0.1) !important;
+  color: #0d9488 !important;
+}
+
+.leaflet-control-attribution {
+  background: rgba(255, 255, 255, 0.9) !important;
+  color: rgba(51, 51, 51, 0.7) !important;
+  border: 1px solid rgba(20, 184, 166, 0.2) !important;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
+}
+
+.leaflet-control-attribution a {
+  color: #14b8a6 !important;
+}
+
+/* Custom scrollbar for map if needed */
+.map-container::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.map-container::-webkit-scrollbar-track {
+  background: #1a1f3a;
+}
+
+.map-container::-webkit-scrollbar-thumb {
+  background: #14b8a6;
+  border-radius: 4px;
+}
+
+/* Tablet and Mobile Responsive Styles */
+@media (max-width: 1024px) {
+  .map-container {
+    border-radius: 8px;
+  }
+
+  .leaflet-control-zoom {
+    transform: scale(0.9);
+  }
+}
+
+@media (max-width: 768px) {
+  .map-container {
+    border-radius: 0;
+    min-height: 400px;
+  }
+
+  .leaflet-control-zoom {
+    transform: scale(0.85);
+  }
+
+  .leaflet-control-zoom a {
+    width: 32px;
+    height: 32px;
+    line-height: 32px;
+    font-size: 18px;
+  }
+}
+
+@media (max-width: 480px) {
+  .map-container {
+    min-height: 300px;
+  }
+
+  .leaflet-control-zoom {
+    transform: scale(0.75);
+  }
+}
+

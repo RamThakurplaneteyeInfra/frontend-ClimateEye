@@ -1,0 +1,25 @@
+{
+  "name": "sky-eye-frontend",
+  "version": "1.0.0",
+  "description": "SKY EYE - Environmental Monitoring Dashboard",
+  "private": true,
+  "dependencies": {
+    "date-fns": "^2.30.0",
+    "leaflet": "^1.9.4",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-leaflet": "^4.2.1",
+    "react-router-dom": "^6.20.0",
+    "recharts": "^3.5.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.1",
+    "vite": "^5.0.8"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  }
+}
