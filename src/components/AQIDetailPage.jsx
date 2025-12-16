@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { format, parseISO, subDays, addDays, isToday, startOfDay } from 'date-fns'
+import { format, parseISO, subDays, addDays, isToday, startOfDay, subHours } from 'date-fns'
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import * as XLSX from 'xlsx'
-import { fetchHourlyAQIData, fetchHourlyWeatherData, calculateGeometryCenter } from '../services/api'
+import { fetchHourlyAQIData, fetchHourlyWeatherData, fetchHourlyAQIDataRange, calculateGeometryCenter } from '../services/api'
 import './AQIDetailPage.css'
 
 const AQIDetailPage = () => {
@@ -20,6 +20,7 @@ const AQIDetailPage = () => {
   const [chartType, setChartType] = useState('line') // 'line' or 'bar'
   const [selectedParameters, setSelectedParameters] = useState(['aqi', 'pm2_5', 'pm10']) // Default selected parameters
   const [selectionMode, setSelectionMode] = useState('multiple') // 'single' or 'multiple'
+  const [viewMode, setViewMode] = useState('live') // 'live', 'daily', 'weekly', 'monthly'
 
   // Combined parameters: AQI + Weather
   const parameters = [
@@ -53,12 +54,13 @@ const AQIDetailPage = () => {
     }
   }, [geometry])
 
-  // Fetch data for selected date when it changes
+  // Fetch data for selected date when it changes or view mode changes
   useEffect(() => {
     if (coordinates) {
       fetchHourlyData()
     }
-  }, [selectedDate, coordinates])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, coordinates, viewMode])
 
   const fetchHourlyData = async () => {
     if (!coordinates) return
@@ -67,22 +69,76 @@ const AQIDetailPage = () => {
     setError(null)
     
     try {
-      // Fetch both AQI and Weather data in parallel
-      const [aqiData, weatherData] = await Promise.all([
-        fetchHourlyAQIData(
-          coordinates.latitude,
-          coordinates.longitude,
-          selectedDate
-        ),
-        fetchHourlyWeatherData(
-          coordinates.latitude,
-          coordinates.longitude,
-          selectedDate
-        )
-      ])
+      const today = format(new Date(), 'yyyy-MM-dd')
+      let aqiRecords = []
+      let weatherRecords = []
+
+      if (viewMode === 'live') {
+        // Live: Current data (last hour)
+        const now = new Date()
+        const oneHourAgo = subHours(now, 1)
+        const [aqiData, weatherData] = await Promise.all([
+          fetchHourlyAQIData(coordinates.latitude, coordinates.longitude, today),
+          fetchHourlyWeatherData(coordinates.latitude, coordinates.longitude, today)
+        ])
+        
+        // Filter to last hour
+        aqiRecords = (aqiData.hourly_records || []).filter(r => {
+          if (!r || !r.date) return false
+          const recordTime = parseISO(r.date)
+          return recordTime >= oneHourAgo
+        })
+        
+        weatherRecords = (weatherData.hourly_records || []).filter(r => {
+          if (!r || !r.date) return false
+          const recordTime = parseISO(r.date)
+          return recordTime >= oneHourAgo
+        })
+      } else if (viewMode === 'daily') {
+        // Daily: Last 24 hours (today's hourly data)
+        const [aqiData, weatherData] = await Promise.all([
+          fetchHourlyAQIData(coordinates.latitude, coordinates.longitude, today),
+          fetchHourlyWeatherData(coordinates.latitude, coordinates.longitude, today)
+        ])
+        
+        aqiRecords = aqiData.hourly_records || []
+        weatherRecords = weatherData.hourly_records || []
+      } else if (viewMode === 'weekly') {
+        // Weekly: Last 7 days
+        const weekAgo = format(subDays(new Date(), 7), 'yyyy-MM-dd')
+        
+        // Fetch AQI range
+        const aqiRange = await fetchHourlyAQIDataRange(coordinates.latitude, coordinates.longitude, weekAgo, today)
+        aqiRecords = aqiRange.hourly_records || []
+        
+        // Fetch weather data for each day (no range endpoint available)
+        const weatherPromises = []
+        for (let i = 0; i < 7; i++) {
+          const date = format(subDays(new Date(), i), 'yyyy-MM-dd')
+          weatherPromises.push(fetchHourlyWeatherData(coordinates.latitude, coordinates.longitude, date))
+        }
+        const weatherResults = await Promise.all(weatherPromises)
+        weatherRecords = weatherResults.flatMap(r => r.hourly_records || [])
+      } else if (viewMode === 'monthly') {
+        // Monthly: Last 30 days
+        const monthAgo = format(subDays(new Date(), 30), 'yyyy-MM-dd')
+        
+        // Fetch AQI range
+        const aqiRange = await fetchHourlyAQIDataRange(coordinates.latitude, coordinates.longitude, monthAgo, today)
+        aqiRecords = aqiRange.hourly_records || []
+        
+        // Fetch weather data for each day (no range endpoint available)
+        const weatherPromises = []
+        for (let i = 0; i < 30; i++) {
+          const date = format(subDays(new Date(), i), 'yyyy-MM-dd')
+          weatherPromises.push(fetchHourlyWeatherData(coordinates.latitude, coordinates.longitude, date))
+        }
+        const weatherResults = await Promise.all(weatherPromises)
+        weatherRecords = weatherResults.flatMap(r => r.hourly_records || [])
+      }
       
-      setHourlyAQIData(aqiData.hourly_records || [])
-      setHourlyWeatherData(weatherData.hourly_records || [])
+      setHourlyAQIData(aqiRecords)
+      setHourlyWeatherData(weatherRecords)
     } catch (err) {
       setError(err.message)
       console.error('Error fetching hourly data:', err)
@@ -139,6 +195,12 @@ const AQIDetailPage = () => {
     setSelectedParameters([])
   }
 
+  // Handle chart refresh
+  const handleRefreshChart = async () => {
+    if (!coordinates) return
+    await fetchHourlyData()
+  }
+
   // Prepare chart data - merge AQI and Weather data by time
   const chartData = useMemo(() => {
     if (!hourlyAQIData.length && !hourlyWeatherData.length) return []
@@ -146,46 +208,183 @@ const AQIDetailPage = () => {
     // Create a map to merge data by time
     const dataMap = new Map()
     
-    // Add AQI data
-    hourlyAQIData.forEach(record => {
-      try {
-        const date = parseISO(record.date)
-        const timeKey = format(date, 'HH:mm')
+    // Helper function to get time key based on view mode
+    const getTimeKey = (date) => {
+      const parsedDate = parseISO(date)
+      if (viewMode === 'live') {
+        // Live: Show minutes (1, 5, 10, ..., 60)
+        const now = new Date()
+        const minutesDiff = Math.floor((now - parsedDate) / (1000 * 60))
+        const minutePosition = 60 - minutesDiff
+        return minutePosition > 0 ? minutePosition.toString() : format(parsedDate, 'HH:mm')
+      } else if (viewMode === 'daily') {
+        // Daily: Show hours (1-24)
+        const now = new Date()
+        const hoursDiff = Math.floor((now - parsedDate) / (1000 * 60 * 60))
+        const hourPosition = 24 - hoursDiff
+        return hourPosition > 0 ? hourPosition.toString() : format(parsedDate, 'HH:mm')
+      } else if (viewMode === 'weekly') {
+        // Weekly: Show days (1st day, 2nd day, ..., 7th day)
+        const today = startOfDay(new Date())
+        const recordDay = startOfDay(parsedDate)
+        const daysDiff = Math.floor((today - recordDay) / (1000 * 60 * 60 * 24))
+        const dayNumber = 7 - daysDiff
+        if (dayNumber >= 1 && dayNumber <= 7) {
+          const getDaySuffix = (day) => {
+            if (day >= 11 && day <= 13) return 'th'
+            switch (day % 10) {
+              case 1: return 'st'
+              case 2: return 'nd'
+              case 3: return 'rd'
+              default: return 'th'
+            }
+          }
+          return dayNumber === 7 ? '7th day/Current day' : `${dayNumber}${getDaySuffix(dayNumber)} day`
+        }
+        return format(parsedDate, 'MMM dd')
+      } else if (viewMode === 'monthly') {
+        // Monthly: Show days (1-30/31)
+        const today = startOfDay(new Date())
+        const recordDay = startOfDay(parsedDate)
+        const daysDiff = Math.floor((today - recordDay) / (1000 * 60 * 60 * 24))
+        const dayNumber = 30 - daysDiff
+        return dayNumber > 0 ? dayNumber.toString() : format(parsedDate, 'MMM dd')
+      }
+      return format(parsedDate, 'HH:mm')
+    }
+    
+    // Add AQI data - for weekly/monthly, we need to aggregate properly
+    if (viewMode === 'weekly' || viewMode === 'monthly') {
+      // Group records by day first
+      const dailyGroups = new Map()
+      
+      hourlyAQIData.forEach(record => {
+        try {
+          const date = parseISO(record.date)
+          const timeKey = getTimeKey(record.date)
+          
+          if (!dailyGroups.has(timeKey)) {
+            dailyGroups.set(timeKey, [])
+          }
+          dailyGroups.get(timeKey).push({ ...record, date: record.date, parsedDate: date })
+        } catch {
+          // Skip invalid records
+        }
+      })
+      
+      // Process each day group
+      dailyGroups.forEach((records, timeKey) => {
+        // Sort records by date (most recent first)
+        records.sort((a, b) => b.parsedDate - a.parsedDate)
         
-        if (!dataMap.has(timeKey)) {
-          dataMap.set(timeKey, {
-            time: timeKey,
-            fullTime: format(date, 'HH:mm:ss'),
-            date: record.date
-          })
+        // Calculate average AQI and other values
+        const validRecords = records.filter(r => r.aqi !== null && r.aqi !== undefined)
+        if (validRecords.length === 0) return
+        
+        const avgAqi = validRecords.reduce((sum, r) => sum + r.aqi, 0) / validRecords.length
+        const avgPm25 = validRecords.filter(r => r.pm2_5 !== null).reduce((sum, r) => sum + r.pm2_5, 0) / validRecords.filter(r => r.pm2_5 !== null).length || null
+        const avgPm10 = validRecords.filter(r => r.pm10 !== null).reduce((sum, r) => sum + r.pm10, 0) / validRecords.filter(r => r.pm10 !== null).length || null
+        const avgCo = validRecords.filter(r => r.co !== null).reduce((sum, r) => sum + r.co, 0) / validRecords.filter(r => r.co !== null).length || null
+        const avgNo2 = validRecords.filter(r => r.no2 !== null).reduce((sum, r) => sum + r.no2, 0) / validRecords.filter(r => r.no2 !== null).length || null
+        const avgSo2 = validRecords.filter(r => r.so2 !== null).reduce((sum, r) => sum + r.so2, 0) / validRecords.filter(r => r.so2 !== null).length || null
+        const avgO3 = validRecords.filter(r => r.o3 !== null).reduce((sum, r) => sum + r.o3, 0) / validRecords.filter(r => r.o3 !== null).length || null
+        
+        // Use trend from most recent record, or calculate trend based on first and last AQI
+        let trend = null
+        let trendPercentage = null
+        
+        if (validRecords.length >= 2) {
+          // Calculate trend: compare first (oldest) and last (newest) AQI values
+          const sortedByDate = [...validRecords].sort((a, b) => a.parsedDate - b.parsedDate)
+          const firstAqi = sortedByDate[0].aqi
+          const lastAqi = sortedByDate[sortedByDate.length - 1].aqi
+          
+          if (firstAqi !== null && lastAqi !== null && firstAqi !== undefined && lastAqi !== undefined) {
+            const diff = lastAqi - firstAqi
+            const percentChange = firstAqi > 0 ? ((diff / firstAqi) * 100) : 0
+            
+            if (diff > 0) {
+              trend = '↑'
+            } else if (diff < 0) {
+              trend = '↓'
+            } else {
+              trend = '→'
+            }
+            trendPercentage = Math.abs(percentChange)
+          }
+        } else if (validRecords.length === 1) {
+          // Use trend from the single record if available
+          trend = validRecords[0].trend
+          trendPercentage = validRecords[0].trend_percentage
         }
         
-        const entry = dataMap.get(timeKey)
-        Object.assign(entry, {
-          aqi: record.aqi,
-          pm2_5: record.pm2_5,
-          pm10: record.pm10,
-          co: record.co,
-          no2: record.no2,
-          so2: record.so2,
-          o3: record.o3
+        // Use data_source from most recent record
+        const dataSource = records[0].data_source || null
+        
+        dataMap.set(timeKey, {
+          time: timeKey,
+          fullTime: format(records[0].parsedDate, 'HH:mm:ss'),
+          date: records[0].date,
+          originalDate: records[0].parsedDate,
+          aqi: Math.round(avgAqi),
+          pm2_5: avgPm25 !== null ? parseFloat(avgPm25.toFixed(2)) : null,
+          pm10: avgPm10 !== null ? parseFloat(avgPm10.toFixed(2)) : null,
+          co: avgCo !== null ? parseFloat(avgCo.toFixed(2)) : null,
+          no2: avgNo2 !== null ? parseFloat(avgNo2.toFixed(2)) : null,
+          so2: avgSo2 !== null ? parseFloat(avgSo2.toFixed(2)) : null,
+          o3: avgO3 !== null ? parseFloat(avgO3.toFixed(2)) : null,
+          trend: trend,
+          trend_percentage: trendPercentage !== null ? parseFloat(trendPercentage.toFixed(1)) : null,
+          data_source: dataSource
         })
-      } catch {
-        // Skip invalid records
-      }
-    })
+      })
+    } else {
+      // For live and daily, use original logic
+      hourlyAQIData.forEach(record => {
+        try {
+          const date = parseISO(record.date)
+          const timeKey = getTimeKey(record.date)
+          
+          if (!dataMap.has(timeKey)) {
+            dataMap.set(timeKey, {
+              time: timeKey,
+              fullTime: format(date, 'HH:mm:ss'),
+              date: record.date,
+              originalDate: date
+            })
+          }
+          
+          const entry = dataMap.get(timeKey)
+          Object.assign(entry, {
+            aqi: record.aqi,
+            pm2_5: record.pm2_5,
+            pm10: record.pm10,
+            co: record.co,
+            no2: record.no2,
+            so2: record.so2,
+            o3: record.o3,
+            trend: record.trend,
+            trend_percentage: record.trend_percentage,
+            data_source: record.data_source
+          })
+        } catch {
+          // Skip invalid records
+        }
+      })
+    }
     
     // Add Weather data
     hourlyWeatherData.forEach(record => {
       try {
         const date = parseISO(record.date)
-        const timeKey = format(date, 'HH:mm')
+        const timeKey = getTimeKey(record.date)
         
         if (!dataMap.has(timeKey)) {
           dataMap.set(timeKey, {
             time: timeKey,
             fullTime: format(date, 'HH:mm:ss'),
-            date: record.date
+            date: record.date,
+            originalDate: date
           })
         }
         
@@ -207,10 +406,15 @@ const AQIDetailPage = () => {
       }
     })
     
-    // Convert map to array and sort by time
+    // Convert map to array and sort by original date
     return Array.from(dataMap.values())
-      .sort((a, b) => a.time.localeCompare(b.time))
-  }, [hourlyAQIData, hourlyWeatherData])
+      .sort((a, b) => {
+        if (a.originalDate && b.originalDate) {
+          return a.originalDate - b.originalDate
+        }
+        return a.time.localeCompare(b.time)
+      })
+  }, [hourlyAQIData, hourlyWeatherData, viewMode])
 
   // Calculate statistics for selected parameters (for tooltip)
   const calculateStats = (data, paramKey) => {
@@ -504,7 +708,7 @@ const AQIDetailPage = () => {
           disabled={!canGoPrev()}
           className="nav-button"
         >
-          ← Previous
+        ←z Previous
         </button>
         <div className="date-display">
           <span className="selected-date">{format(parseISO(selectedDate), 'MMMM dd, yyyy')}</span>
@@ -532,27 +736,102 @@ const AQIDetailPage = () => {
             </svg>
             <span>Data Visualization</span>
           </div>
-          <div className="chart-type-toggle">
+          <div className="chart-controls">
+            <div className="chart-type-toggle">
+              <button 
+                className={chartType === 'line' ? 'active' : ''}
+                onClick={() => setChartType('line')}
+              >
+                Line
+              </button>
+              <button 
+                className={chartType === 'bar' ? 'active' : ''}
+                onClick={() => setChartType('bar')}
+              >
+                Bar
+              </button>
+            </div>
             <button 
-              className={chartType === 'line' ? 'active' : ''}
-              onClick={() => setChartType('line')}
+              className="chart-refresh-button"
+              onClick={handleRefreshChart}
+              disabled={loading || !coordinates}
+              title="Refresh Chart Data"
             >
-              Line
-            </button>
-            <button 
-              className={chartType === 'bar' ? 'active' : ''}
-              onClick={() => setChartType('bar')}
-            >
-              Bar
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path>
+                <path d="M21 3v5h-5"></path>
+                <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path>
+                <path d="M3 21v-5h5"></path>
+              </svg>
             </button>
           </div>
         </div>
+
+        {/* View Mode Buttons */}
+        {/* <div className="view-mode-buttons">
+          <button
+            className={`view-mode-button ${viewMode === 'live' ? 'active' : ''}`}
+            onClick={() => setViewMode('live')}
+            disabled={loading}
+          >
+            Live
+          </button>
+          <button
+            className={`view-mode-button ${viewMode === 'daily' ? 'active' : ''}`}
+            onClick={() => setViewMode('daily')}
+            disabled={loading}
+          >
+            Daily
+          </button>
+          <button
+            className={`view-mode-button ${viewMode === 'weekly' ? 'active' : ''}`}
+            onClick={() => setViewMode('weekly')}
+            disabled={loading}
+          >
+            Weekly
+          </button>
+          <button
+            className={`view-mode-button ${viewMode === 'monthly' ? 'active' : ''}`}
+            onClick={() => setViewMode('monthly')}
+            disabled={loading}
+          >
+            Monthly
+          </button>
+        </div> */}
 
         {/* Parameters Selection */}
         <div className="parameters-section">
           <div className="parameters-header">
             <span className="parameters-label">Parameters:</span>
             <div className="parameter-actions">
+            <button
+            className={`view-mode-button ${viewMode === 'live' ? 'active' : ''}`}
+            onClick={() => setViewMode('live')}
+            disabled={loading}
+          >
+            Live
+          </button>
+          <button
+            className={`view-mode-button ${viewMode === 'daily' ? 'active' : ''}`}
+            onClick={() => setViewMode('daily')}
+            disabled={loading}
+          >
+            Daily
+          </button>
+          <button
+            className={`view-mode-button ${viewMode === 'weekly' ? 'active' : ''}`}
+            onClick={() => setViewMode('weekly')}
+            disabled={loading}
+          >
+            Weekly
+          </button>
+          <button
+            className={`view-mode-button ${viewMode === 'monthly' ? 'active' : ''}`}
+            onClick={() => setViewMode('monthly')}
+            disabled={loading}
+          >
+            Monthly
+          </button>
               <div className="selection-mode-toggle">
                 <button 
                   className={`mode-button ${selectionMode === 'single' ? 'active' : ''}`}
@@ -651,13 +930,26 @@ const AQIDetailPage = () => {
           <div className="chart-container">
             {chartType === 'line' ? (
               <ResponsiveContainer width="100%" height={400}>
-                <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 40 }}>
+                <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: viewMode === 'weekly' || viewMode === 'monthly' ? 60 : 40 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(20, 184, 166, 0.2)" />
                   <XAxis 
                     dataKey="time" 
                     stroke="#9ca3af"
                     style={{ fontSize: '12px' }}
-                    label={{ value: 'Time (HH:mm)', position: 'insideBottom', offset: -5, style: { fill: '#9ca3af' } }}
+                    angle={viewMode === 'weekly' ? -45 : viewMode === 'monthly' ? -45 : 0}
+                    textAnchor={viewMode === 'weekly' ? 'end' : viewMode === 'monthly' ? 'end' : 'middle'}
+                    height={viewMode === 'weekly' ? 70 : viewMode === 'monthly' ? 60 : 40}
+                    interval={viewMode === 'live' ? 4 : viewMode === 'daily' ? 2 : viewMode === 'weekly' ? 0 : viewMode === 'monthly' ? 2 : 0}
+                    label={{ 
+                      value: viewMode === 'live' ? 'Minutes (1-60)' : 
+                             viewMode === 'daily' ? 'Hours (1-24)' : 
+                             viewMode === 'weekly' ? 'Days' : 
+                             viewMode === 'monthly' ? 'Days (1-30/31)' : 
+                             'Time (HH:mm)', 
+                      position: 'insideBottom', 
+                      offset: -5, 
+                      style: { fill: '#9ca3af' } 
+                    }}
                   />
                   <YAxis 
                     stroke="#9ca3af"
@@ -686,13 +978,26 @@ const AQIDetailPage = () => {
               </ResponsiveContainer>
             ) : (
               <ResponsiveContainer width="100%" height={400}>
-                <BarChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 40 }}>
+                <BarChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: viewMode === 'weekly' || viewMode === 'monthly' ? 60 : 40 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(20, 184, 166, 0.2)" />
                   <XAxis 
                     dataKey="time" 
                     stroke="#9ca3af"
                     style={{ fontSize: '12px' }}
-                    label={{ value: 'Time (HH:mm)', position: 'insideBottom', offset: -5, style: { fill: '#9ca3af' } }}
+                    angle={viewMode === 'weekly' ? -45 : viewMode === 'monthly' ? -45 : 0}
+                    textAnchor={viewMode === 'weekly' ? 'end' : viewMode === 'monthly' ? 'end' : 'middle'}
+                    height={viewMode === 'weekly' ? 70 : viewMode === 'monthly' ? 60 : 40}
+                    interval={viewMode === 'live' ? 4 : viewMode === 'daily' ? 2 : viewMode === 'weekly' ? 0 : viewMode === 'monthly' ? 2 : 0}
+                    label={{ 
+                      value: viewMode === 'live' ? 'Minutes (1-60)' : 
+                             viewMode === 'daily' ? 'Hours (1-24)' : 
+                             viewMode === 'weekly' ? 'Days' : 
+                             viewMode === 'monthly' ? 'Days (1-30/31)' : 
+                             'Time (HH:mm)', 
+                      position: 'insideBottom', 
+                      offset: -5, 
+                      style: { fill: '#9ca3af' } 
+                    }}
                   />
                   <YAxis 
                     stroke="#9ca3af"
@@ -763,15 +1068,12 @@ const AQIDetailPage = () => {
                 const dateStr = record.date || record.fullTime
                 const { date: datePart, time } = formatDateTime(dateStr)
                 const category = getAQICategory(record.aqi)
-                const aqiRecord = hourlyAQIData.find(r => {
-                  try {
-                    return format(parseISO(r.date), 'HH:mm') === record.time
-                  } catch {
-                    return false
-                  }
-                })
+                // Use trend and source from chartData (already merged from hourlyAQIData)
+                const trend = record.trend
+                const trendPercentage = record.trend_percentage
+                const dataSource = record.data_source
                 return (
-                  <tr key={index} className={aqiRecord?.data_source === 'Current' ? 'current-row' : ''}>
+                  <tr key={index} className={dataSource === 'Current' ? 'current-row' : ''}>
                     <td>{datePart}</td>
                     <td>{time}</td>
                     <td>
@@ -795,16 +1097,17 @@ const AQIDetailPage = () => {
                     <td>{record.wind_speed !== null && record.wind_speed !== undefined ? `${record.wind_speed.toFixed(1)} km/h` : 'N/A'}</td>
                     <td>{record.uv_index !== null && record.uv_index !== undefined ? record.uv_index.toFixed(1) : 'N/A'}</td>
                     <td>
-                      {aqiRecord?.trend && (
-                        <span className={`trend-arrow ${aqiRecord.trend === '↑' ? 'trend-up' : aqiRecord.trend === '↓' ? 'trend-down' : 'trend-same'}`}>
-                          {aqiRecord.trend} {aqiRecord.trend_percentage !== null && aqiRecord.trend_percentage !== undefined ? `${aqiRecord.trend_percentage}%` : ''}
+                      {trend && (
+                        <span className={`trend-arrow ${trend === '↑' ? 'trend-up' : trend === '↓' ? 'trend-down' : 'trend-same'}`}>
+                          {trend} {trendPercentage !== null && trendPercentage !== undefined ? `${trendPercentage}%` : ''}
                         </span>
                       )}
                     </td>
                     <td>
-                      {aqiRecord?.data_source && (
-                        <span className={`source-badge ${aqiRecord.data_source.toLowerCase().replace('/', '-')}`}>
-                          {aqiRecord.data_source}
+                      {dataSource && (
+                        <span className={`source-badge ${dataSource.toLowerCase().replace('/', '-')}`}>
+                          {/* {dataSource} */}
+                          {dataSource=="History/Estimate"? "S":"A"}
                         </span>
                       )}
                     </td>

@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { format, subDays, startOfDay, isAfter, addDays, isBefore, isEqual, isToday } from 'date-fns'
+import { format, subDays, startOfDay, isAfter, addDays, isBefore, isEqual, isToday, subHours, parseISO } from 'date-fns'
+import { LineChart, Line, BarChart, Bar, ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea, Cell, Dot } from 'recharts'
 import MapComponent from './MapComponent'
 import WeatherSection from './WeatherSection'
 import AQISection from './AQISection'
-import { calculateGeometryCenter, fetchAQIData, fetchWeatherData } from '../services/api'
+import { calculateGeometryCenter, fetchAQIData, fetchWeatherData, fetchHourlyAQIDataRange, fetchHourlyWeatherData, fetchHourlyAQIData } from '../services/api'
 import './Dashboard.css'
 import './DatePicker.css'
 
@@ -22,13 +23,18 @@ const Dashboard = () => {
   const [isDrawing, setIsDrawing] = useState(false)
   const [drawnGeometry, setDrawnGeometry] = useState(null)
   const [uploadedKML, setUploadedKML] = useState(null)
-  const [showAnalysis, setShowAnalysis] = useState(false)
+  const [showAnalysis, setShowAnalysis] = useState(false) 
   const [currentViewDate, setCurrentViewDate] = useState(null) // Currently viewing date
   const [weatherData, setWeatherData] = useState(null)
   const [aqiData, setAqiData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [sidebarOpen, setSidebarOpen] = useState(false) // For mobile sidebar toggle
+  const [viewMode, setViewMode] = useState('live') // 'live', 'daily', 'weekly', 'monthly'
+  const [aqiChartData, setAqiChartData] = useState([]) // For AQI chart
+  const [loadingChart, setLoadingChart] = useState(false)
+  const [timeChartData, setTimeChartData] = useState([]) // For Time chart
+  const [loadingTimeChart, setLoadingTimeChart] = useState(false)
 
   useEffect(() => {
     // Update dates daily - recalculate one week ago from today
@@ -258,11 +264,128 @@ const Dashboard = () => {
     return null
   }
 
-  // Fetch data for a specific date
+  // Helper function to aggregate hourly data
+  const aggregateHourlyData = (hourlyRecords, type) => {
+    if (!hourlyRecords || hourlyRecords.length === 0) return null
+
+    if (type === 'aqi') {
+      const validRecords = hourlyRecords.filter(r => r.aqi !== null && r.aqi !== undefined)
+      if (validRecords.length === 0) return null
+
+      return {
+        aqi: Math.round(validRecords.reduce((sum, r) => sum + r.aqi, 0) / validRecords.length),
+        pm2_5: validRecords.reduce((sum, r) => sum + (r.pm2_5 || 0), 0) / validRecords.length,
+        pm10: validRecords.reduce((sum, r) => sum + (r.pm10 || 0), 0) / validRecords.length,
+        co: validRecords.reduce((sum, r) => sum + (r.co || 0), 0) / validRecords.length,
+        so2: validRecords.reduce((sum, r) => sum + (r.so2 || 0), 0) / validRecords.length,
+        no2: validRecords.reduce((sum, r) => sum + (r.no2 || 0), 0) / validRecords.length,
+        o3: validRecords.reduce((sum, r) => sum + (r.o3 || 0), 0) / validRecords.length,
+        date: hourlyRecords[hourlyRecords.length - 1]?.date || new Date().toISOString()
+      }
+    } else {
+      const validRecords = hourlyRecords.filter(r => r.temperature !== null && r.temperature !== undefined)
+      if (validRecords.length === 0) return null
+
+      return {
+        temperature: Math.round(validRecords.reduce((sum, r) => sum + r.temperature, 0) / validRecords.length),
+        feels_like: validRecords.reduce((sum, r) => sum + (r.feels_like || r.temperature), 0) / validRecords.length,
+        humidity: validRecords.reduce((sum, r) => sum + (r.humidity || 0), 0) / validRecords.length,
+        wind_speed: validRecords.reduce((sum, r) => sum + (r.wind_speed || 0), 0) / validRecords.length,
+        uv_index: validRecords.reduce((sum, r) => sum + (r.uv_index || 0), 0) / validRecords.length,
+        condition: validRecords[validRecords.length - 1]?.condition || 'Unknown',
+        icon: validRecords[validRecords.length - 1]?.icon || 'cloud',
+        date: hourlyRecords[hourlyRecords.length - 1]?.date || new Date().toISOString()
+      }
+    }
+  }
+
+  // Fetch data based on view mode
+  const fetchDataForMode = async (latitude, longitude) => {
+    setLoading(true)
+    setError(null)
+    setWeatherData(null)
+    setAqiData(null)
+
+    try {
+      const today = format(new Date(), 'yyyy-MM-dd')
+      
+      if (viewMode === 'live') {
+        // Live: Current data (no date parameter)
+        const [weather, aqi] = await Promise.all([
+          fetchWeatherData(latitude, longitude),
+          fetchAQIData(latitude, longitude)
+        ])
+        setWeatherData(weather)
+        setAqiData(aqi)
+      } else if (viewMode === 'daily') {
+        // Daily: Last 24 hours (today's hourly data)
+        const [weatherHourly, aqiHourly] = await Promise.all([
+          fetchHourlyWeatherData(latitude, longitude, today),
+          fetchHourlyAQIData(latitude, longitude, today)
+        ])
+        
+        const weatherAggregated = aggregateHourlyData(weatherHourly.hourly_records || [], 'weather')
+        const aqiAggregated = aggregateHourlyData(aqiHourly.hourly_records || [], 'aqi')
+        
+        setWeatherData(weatherAggregated)
+        setAqiData(aqiAggregated)
+      } else if (viewMode === 'weekly') {
+        // Weekly: Past 7 days
+        const weekAgo = format(subDays(new Date(), 7), 'yyyy-MM-dd')
+        
+        // Fetch weather data for each day in the week
+        const weatherPromises = []
+        for (let i = 0; i < 7; i++) {
+          const date = format(subDays(new Date(), i), 'yyyy-MM-dd')
+          weatherPromises.push(fetchHourlyWeatherData(latitude, longitude, date))
+        }
+        
+        const [weatherResults, aqiRange] = await Promise.all([
+          Promise.all(weatherPromises),
+          fetchHourlyAQIDataRange(latitude, longitude, weekAgo, today)
+        ])
+        
+        const allWeatherRecords = weatherResults.flatMap(r => r.hourly_records || [])
+        const weatherAggregated = aggregateHourlyData(allWeatherRecords, 'weather')
+        const aqiAggregated = aggregateHourlyData(aqiRange.hourly_records || [], 'aqi')
+        
+        setWeatherData(weatherAggregated)
+        setAqiData(aqiAggregated)
+      } else if (viewMode === 'monthly') {
+        // Monthly: Past 30 days
+        const monthAgo = format(subDays(new Date(), 30), 'yyyy-MM-dd')
+        
+        // Fetch weather data for each day in the month (limit to 30 days to avoid too many requests)
+        const weatherPromises = []
+        for (let i = 0; i < 30; i++) {
+          const date = format(subDays(new Date(), i), 'yyyy-MM-dd')
+          weatherPromises.push(fetchHourlyWeatherData(latitude, longitude, date))
+        }
+        
+        const [weatherResults, aqiRange] = await Promise.all([
+          Promise.all(weatherPromises),
+          fetchHourlyAQIDataRange(latitude, longitude, monthAgo, today)
+        ])
+        
+        const allWeatherRecords = weatherResults.flatMap(r => r.hourly_records || [])
+        const weatherAggregated = aggregateHourlyData(allWeatherRecords, 'weather')
+        const aqiAggregated = aggregateHourlyData(aqiRange.hourly_records || [], 'aqi')
+        
+        setWeatherData(weatherAggregated)
+        setAqiData(aqiAggregated)
+      }
+    } catch (err) {
+      setError(err.message)
+      console.error('Error fetching data:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Fetch data for a specific date (legacy function for date navigation)
   const fetchDataForDate = async (latitude, longitude, date) => {
     setLoading(true)
     setError(null)
-    // Clear previous data to show loading state
     setWeatherData(null)
     setAqiData(null)
 
@@ -279,6 +402,72 @@ const Dashboard = () => {
       console.error('Error fetching data:', err)
     } finally {
       setLoading(false)
+    }
+  }
+
+  // Handle view mode change
+  const handleViewModeChange = async (mode) => {
+    setViewMode(mode)
+    // Set loading state immediately when mode changes
+    setLoadingChart(true)
+    
+    if (showAnalysis && (drawnGeometry || uploadedKML)) {
+      let geometry = drawnGeometry
+      if (!geometry && uploadedKML) {
+        geometry = parseKMLToGeometry(uploadedKML.content)
+      }
+
+      if (geometry) {
+        const center = calculateGeometryCenter(geometry)
+        if (center) {
+          setLoadingTimeChart(true)
+          await Promise.all([
+            fetchDataForMode(center.latitude, center.longitude),
+            fetchAQIChartData(center.latitude, center.longitude),
+            fetchTimeChartData(center.latitude, center.longitude)
+          ])
+        }
+      }
+    } else {
+      // If not in analysis mode, still reset loading
+      setLoadingChart(false)
+      setLoadingTimeChart(false)
+    }
+  }
+
+  // Handle AQI Trend chart refresh
+  const handleRefreshAQIChart = async () => {
+    if (!showAnalysis || (!drawnGeometry && !uploadedKML)) return
+    
+    let geometry = drawnGeometry
+    if (!geometry && uploadedKML) {
+      geometry = parseKMLToGeometry(uploadedKML.content)
+    }
+
+    if (geometry) {
+      const center = calculateGeometryCenter(geometry)
+      if (center) {
+        setLoadingChart(true)
+        await fetchAQIChartData(center.latitude, center.longitude)
+      }
+    }
+  }
+
+  // Handle Time chart refresh
+  const handleRefreshTimeChart = async () => {
+    if (!showAnalysis || (!drawnGeometry && !uploadedKML)) return
+    
+    let geometry = drawnGeometry
+    if (!geometry && uploadedKML) {
+      geometry = parseKMLToGeometry(uploadedKML.content)
+    }
+
+    if (geometry) {
+      const center = calculateGeometryCenter(geometry)
+      if (center) {
+        setLoadingTimeChart(true)
+        await fetchTimeChartData(center.latitude, center.longitude)
+      }
     }
   }
 
@@ -316,9 +505,23 @@ const Dashboard = () => {
       const viewDate = endDate
       setCurrentViewDate(viewDate)
       setShowAnalysis(true)
+      // Reset to live mode when starting new analysis
+      const initialMode = 'live'
+      setViewMode(initialMode)
 
-      // Fetch data for the end date
-      await fetchDataForDate(center.latitude, center.longitude, viewDate)
+      // Fetch live data for initial analysis
+      const [weather, aqi] = await Promise.all([
+        fetchWeatherData(center.latitude, center.longitude),
+        fetchAQIData(center.latitude, center.longitude)
+      ])
+      setWeatherData(weather)
+      setAqiData(aqi)
+      
+      // Fetch chart data
+      await Promise.all([
+        fetchAQIChartData(center.latitude, center.longitude),
+        fetchTimeChartData(center.latitude, center.longitude)
+      ])
     } catch (err) {
       setError(err.message)
       alert(`Error: ${err.message}`)
@@ -327,9 +530,9 @@ const Dashboard = () => {
     }
   }
 
-  // Handle date navigation - fetch data when date changes
+  // Handle date navigation - fetch data when date changes (only for date-based navigation, not view modes)
   useEffect(() => {
-    if (showAnalysis && currentViewDate && (drawnGeometry || uploadedKML)) {
+    if (showAnalysis && currentViewDate && (drawnGeometry || uploadedKML) && viewMode === 'live') {
       let geometry = drawnGeometry
       if (!geometry && uploadedKML) {
         geometry = parseKMLToGeometry(uploadedKML.content)
@@ -344,6 +547,453 @@ const Dashboard = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentViewDate, showAnalysis])
+
+  // Fetch AQI chart data based on view mode
+  const fetchAQIChartData = async (latitude, longitude) => {
+    setLoadingChart(true)
+    try {
+      const today = format(new Date(), 'yyyy-MM-dd')
+      const now = new Date()
+      let chartData = []
+
+      if (viewMode === 'live') {
+        // Live: Last 60 minutes - X-axis shows 1, 5, 10, ..., 60
+        const aqiHourly = await fetchHourlyAQIData(latitude, longitude, today)
+        const records = aqiHourly.hourly_records || []
+        
+        // Get records from the last hour (60 minutes)
+        const oneHourAgo = subHours(now, 1)
+        const lastHourRecords = records
+          .filter(r => {
+            if (!r || r.aqi === null || r.aqi === undefined) return false
+            const recordTime = parseISO(r.date)
+            return recordTime >= oneHourAgo
+          })
+          .sort((a, b) => parseISO(a.date) - parseISO(b.date))
+        
+        // Create minute buckets (1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60)
+        const minuteBuckets = [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
+        
+        if (lastHourRecords.length > 0) {
+          // Map records to closest minute bucket
+          chartData = minuteBuckets.map(minute => {
+            const targetTime = subHours(now, 1).getTime() + (60 - minute) * 60 * 1000
+            const closestRecord = lastHourRecords.reduce((closest, record) => {
+              const recordTime = parseISO(record.date).getTime()
+              const closestTime = closest ? parseISO(closest.date).getTime() : null
+              if (!closestTime) return record
+              return Math.abs(recordTime - targetTime) < Math.abs(closestTime - targetTime) ? record : closest
+            }, null)
+            
+            return {
+              time: minute.toString(),
+              aqi: closestRecord ? closestRecord.aqi : (lastHourRecords[0]?.aqi || 0),
+              fullTime: closestRecord ? closestRecord.date : now.toISOString(),
+              minute: minute
+            }
+          })
+        } else {
+          // Fallback: use last few records and map to minute positions
+          const fallbackRecords = records.slice(-12).filter(r => r && r.aqi !== null && r.aqi !== undefined)
+          chartData = minuteBuckets.map((minute, idx) => ({
+            time: minute.toString(),
+            aqi: fallbackRecords[idx]?.aqi || fallbackRecords[0]?.aqi || 0,
+            fullTime: fallbackRecords[idx]?.date || now.toISOString(),
+            minute: minute
+          }))
+        }
+      } else if (viewMode === 'daily') {
+        // Daily: Last 24 hours - X-axis shows 1, 2, 3, ..., 24
+        const aqiHourly = await fetchHourlyAQIData(latitude, longitude, today)
+        const records = aqiHourly.hourly_records || []
+        
+        // Get last 24 hours of records
+        const twentyFourHoursAgo = subHours(now, 24)
+        const last24HoursRecords = records
+          .filter(r => {
+            if (!r || r.aqi === null || r.aqi === undefined) return false
+            const recordTime = parseISO(r.date)
+            return recordTime >= twentyFourHoursAgo
+          })
+          .sort((a, b) => parseISO(a.date) - parseISO(b.date))
+        
+        // Create hour buckets (1-24)
+        const hourBuckets = Array.from({ length: 24 }, (_, i) => i + 1)
+        
+        if (last24HoursRecords.length > 0) {
+          // Map records to hour positions
+          const hourMap = new Map()
+          last24HoursRecords.forEach(record => {
+            const recordTime = parseISO(record.date)
+            const hoursDiff = Math.floor((now - recordTime) / (1000 * 60 * 60))
+            const hourPosition = 24 - hoursDiff
+            if (hourPosition >= 1 && hourPosition <= 24) {
+              if (!hourMap.has(hourPosition)) {
+                hourMap.set(hourPosition, [])
+              }
+              hourMap.get(hourPosition).push(record.aqi)
+            }
+          })
+          
+          chartData = hourBuckets.map(hour => {
+            const aqis = hourMap.get(hour) || []
+            const avgAqi = aqis.length > 0 
+              ? Math.round(aqis.reduce((sum, val) => sum + val, 0) / aqis.length)
+              : (last24HoursRecords[0]?.aqi || 0)
+            
+            return {
+              time: hour.toString(),
+              aqi: avgAqi,
+              fullTime: now.toISOString(),
+              hour: hour
+            }
+          })
+        } else {
+          // Fallback: use available records
+          chartData = hourBuckets.map((hour, idx) => ({
+            time: hour.toString(),
+            aqi: records[idx]?.aqi || records[0]?.aqi || 0,
+            fullTime: records[idx]?.date || now.toISOString(),
+            hour: hour
+          }))
+        }
+      } else if (viewMode === 'weekly') {
+        // Weekly: Last 7 days - X-axis shows 1st day, 2nd day, ..., 7th day
+        const weekAgo = format(subDays(now, 6), 'yyyy-MM-dd') // 6 days ago + today = 7 days
+        const aqiRange = await fetchHourlyAQIDataRange(latitude, longitude, weekAgo, today)
+        console.log("7 Days data fetched", aqiRange)
+        const records = aqiRange.hourly_records || []
+        
+        // Group by date and calculate daily averages
+        const dailyData = {}
+        records
+          .filter(r => r && r.aqi !== null && r.aqi !== undefined)
+          .forEach(record => {
+            const date = parseISO(record.date)
+            const dateKey = format(date, 'yyyy-MM-dd')
+            if (!dailyData[dateKey]) {
+              dailyData[dateKey] = { aqis: [], date: date }
+            }
+            dailyData[dateKey].aqis.push(record.aqi)
+          })
+        
+        // Sort dates and map to day positions (1-7)
+        const sortedDates = Object.keys(dailyData).sort()
+        chartData = sortedDates.map((dateKey, index) => {
+          const dayData = dailyData[dateKey]
+          const avgAqi = Math.round(dayData.aqis.reduce((sum, val) => sum + val, 0) / dayData.aqis.length)
+          const dayNumber = index + 1
+          const dayLabel = dayNumber === 7 ? '7th day/Current day' : `${dayNumber}${getDaySuffix(dayNumber)} day`
+          
+          return {
+            time: dayLabel,
+            aqi: avgAqi,
+            fullTime: dateKey,
+            day: dayNumber
+          }
+        })
+      } else if (viewMode === 'monthly') {
+        // Monthly: Last 30/31 days - X-axis shows 1, 2, 3, ..., 30/31
+        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
+        const daysToShow = Math.min(31, daysInMonth)
+        const monthAgo = format(subDays(now, daysToShow - 1), 'yyyy-MM-dd')
+        const aqiRange = await fetchHourlyAQIDataRange(latitude, longitude, monthAgo, today)
+        console.log("30 Days data fetched", aqiRange)
+        const records = aqiRange.hourly_records || []
+        
+        // Group by date and calculate daily averages
+        const dailyData = {}
+        records
+          .filter(r => r && r.aqi !== null && r.aqi !== undefined)
+          .forEach(record => {
+            const date = parseISO(record.date)
+            const dateKey = format(date, 'yyyy-MM-dd')
+            if (!dailyData[dateKey]) {
+              dailyData[dateKey] = { aqis: [], date: date }
+            }
+            dailyData[dateKey].aqis.push(record.aqi)
+          })
+        
+        // Sort dates and map to day positions (1-30/31)
+        const sortedDates = Object.keys(dailyData).sort()
+        chartData = sortedDates.map((dateKey, index) => {
+          const dayData = dailyData[dateKey]
+          const avgAqi = Math.round(dayData.aqis.reduce((sum, val) => sum + val, 0) / dayData.aqis.length)
+          
+          return {
+            time: (index + 1).toString(),
+            aqi: avgAqi,
+            fullTime: dateKey,
+            day: index + 1
+          }
+        })
+        
+        // Ensure we have data points for all days (1-30/31)
+        if (chartData.length < daysToShow) {
+          const dayMap = new Map()
+          chartData.forEach(d => dayMap.set(parseInt(d.time), d.aqi))
+          
+          const allDays = Array.from({ length: daysToShow }, (_, i) => i + 1)
+          chartData = allDays.map(day => ({
+            time: day.toString(),
+            aqi: dayMap.get(day) || (chartData[0]?.aqi || 0),
+            fullTime: format(subDays(now, daysToShow - day), 'yyyy-MM-dd'),
+            day: day
+          }))
+        }
+      }
+
+      setAqiChartData(chartData)
+    } catch (err) {
+      console.error('Error fetching AQI chart data:', err)
+      setAqiChartData([])
+    } finally {
+      setLoadingChart(false)
+    }
+  }
+
+  // Helper function to get day suffix (1st, 2nd, 3rd, etc.)
+  const getDaySuffix = (day) => {
+    if (day >= 11 && day <= 13) return 'th'
+    switch (day % 10) {
+      case 1: return 'st'
+      case 2: return 'nd'
+      case 3: return 'rd'
+      default: return 'th'
+    }
+  }
+
+  // Helper function to convert time string (HH:mm) to minutes for Y-axis
+  const timeToMinutes = (timeStr) => {
+    const [hours, minutes] = timeStr.split(':').map(Number)
+    return hours * 60 + minutes
+  }
+
+  // Helper function to convert minutes to time string (HH:mm)
+  const minutesToTime = (minutes) => {
+    const hours = Math.floor(minutes / 60)
+    const mins = minutes % 60
+    return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`
+  }
+
+  // Fetch Time chart data based on view mode
+  const fetchTimeChartData = async (latitude, longitude) => {
+    setLoadingTimeChart(true)
+    try {
+      const today = format(new Date(), 'yyyy-MM-dd')
+      const now = new Date()
+      let chartData = []
+
+      if (viewMode === 'live') {
+        // Live: Last 60 minutes - X-axis: minutes (1-60), Y-axis: time (HH:mm)
+        const aqiHourly = await fetchHourlyAQIData(latitude, longitude, today)
+        const records = aqiHourly.hourly_records || []
+        
+        const oneHourAgo = subHours(now, 1)
+        const lastHourRecords = records
+          .filter(r => {
+            if (!r || r.aqi === null || r.aqi === undefined) return false
+            const recordTime = parseISO(r.date)
+            return recordTime >= oneHourAgo
+          })
+          .sort((a, b) => parseISO(a.date) - parseISO(b.date))
+        
+        const minuteBuckets = [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60]
+        
+        chartData = minuteBuckets.map(minute => {
+          const targetTime = subHours(now, 1).getTime() + (60 - minute) * 60 * 1000
+          const closestRecord = lastHourRecords.reduce((closest, record) => {
+            const recordTime = parseISO(record.date).getTime()
+            const closestTime = closest ? parseISO(closest.date).getTime() : null
+            if (!closestTime) return record
+            return Math.abs(recordTime - targetTime) < Math.abs(closestTime - targetTime) ? record : closest
+          }, null)
+          
+          const recordTime = closestRecord ? parseISO(closestRecord.date) : now
+          const timeStr = format(recordTime, 'HH:mm')
+          
+          return {
+            day: minute.toString(),
+            time: timeStr,
+            timeMinutes: timeToMinutes(timeStr),
+            aqi: closestRecord ? closestRecord.aqi : 0,
+            fullTime: closestRecord ? closestRecord.date : now.toISOString()
+          }
+        })
+      } else if (viewMode === 'daily') {
+        // Daily: Last 24 hours - X-axis: hours (1-24), Y-axis: time (HH:mm)
+        const aqiHourly = await fetchHourlyAQIData(latitude, longitude, today)
+        const records = aqiHourly.hourly_records || []
+        
+        const twentyFourHoursAgo = subHours(now, 24)
+        const last24HoursRecords = records
+          .filter(r => {
+            if (!r || r.aqi === null || r.aqi === undefined) return false
+            const recordTime = parseISO(r.date)
+            return recordTime >= twentyFourHoursAgo
+          })
+          .sort((a, b) => parseISO(a.date) - parseISO(b.date))
+        
+        const hourBuckets = Array.from({ length: 24 }, (_, i) => i + 1)
+        
+        chartData = hourBuckets.map(hour => {
+          const targetTime = subHours(now, 24).getTime() + (24 - hour) * 60 * 60 * 1000
+          const closestRecord = last24HoursRecords.reduce((closest, record) => {
+            const recordTime = parseISO(record.date).getTime()
+            const closestTime = closest ? parseISO(closest.date).getTime() : null
+            if (!closestTime) return record
+            return Math.abs(recordTime - targetTime) < Math.abs(closestTime - targetTime) ? record : closest
+          }, null)
+          
+          const recordTime = closestRecord ? parseISO(closestRecord.date) : now
+          const timeStr = format(recordTime, 'HH:mm')
+          
+          return {
+            day: hour.toString(),
+            time: timeStr,
+            timeMinutes: timeToMinutes(timeStr),
+            aqi: closestRecord ? closestRecord.aqi : 0,
+            fullTime: closestRecord ? closestRecord.date : now.toISOString()
+          }
+        })
+      } else if (viewMode === 'weekly') {
+        // Weekly: Last 7 days - X-axis: days (1-7), Y-axis: AQI values
+        const weekAgo = format(subDays(now, 6), 'yyyy-MM-dd')
+        const aqiRange = await fetchHourlyAQIDataRange(latitude, longitude, weekAgo, today)
+        const records = aqiRange.hourly_records || []
+        
+        // Group by date and get all records with their times
+        const dailyData = {}
+        records
+          .filter(r => r && r.aqi !== null && r.aqi !== undefined)
+          .forEach(record => {
+            const date = parseISO(record.date)
+            const dateKey = format(date, 'yyyy-MM-dd')
+            if (!dailyData[dateKey]) {
+              dailyData[dateKey] = { records: [], date: date }
+            }
+            dailyData[dateKey].records.push({
+              aqi: record.aqi,
+              time: format(date, 'HH:mm'),
+              fullTime: record.date
+            })
+          })
+        
+        const sortedDates = Object.keys(dailyData).sort()
+        chartData = sortedDates.map((dateKey, index) => {
+          const dayData = dailyData[dateKey]
+          const dayNumber = index + 1
+          // Get day name (Monday, Tuesday, etc.)
+          const dayName = format(dayData.date, 'EEEE')
+          
+          // Get average AQI for this day
+          const avgAqi = dayData.records.length > 0
+            ? Math.round(dayData.records.reduce((sum, r) => sum + r.aqi, 0) / dayData.records.length)
+            : 0
+          
+          // Get the time when AQI was recorded (use the record with closest AQI to average, or first record)
+          const closestRecord = dayData.records.reduce((closest, record) => {
+            if (!closest) return record
+            return Math.abs(record.aqi - avgAqi) < Math.abs(closest.aqi - avgAqi) ? record : closest
+          }, null)
+          
+          const timeStr = closestRecord ? closestRecord.time : format(dayData.date, 'HH:mm')
+          
+          return {
+            day: dayName,
+            time: timeStr,
+            timeMinutes: timeToMinutes(timeStr),
+            aqi: avgAqi,
+            fullTime: dateKey,
+            dayNumber: dayNumber
+          }
+        })
+      } else if (viewMode === 'monthly') {
+        // Monthly: Last 30/31 days - X-axis: days (1-30/31), Y-axis: AQI values
+        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
+        const daysToShow = Math.min(31, daysInMonth)
+        const monthAgo = format(subDays(now, daysToShow - 1), 'yyyy-MM-dd')
+        const aqiRange = await fetchHourlyAQIDataRange(latitude, longitude, monthAgo, today)
+        const records = aqiRange.hourly_records || []
+        
+        // Group by date and get all records with their times
+        const dailyData = {}
+        records
+          .filter(r => r && r.aqi !== null && r.aqi !== undefined)
+          .forEach(record => {
+            const date = parseISO(record.date)
+            const dateKey = format(date, 'yyyy-MM-dd')
+            if (!dailyData[dateKey]) {
+              dailyData[dateKey] = { records: [], date: date }
+            }
+            dailyData[dateKey].records.push({
+              aqi: record.aqi,
+              time: format(date, 'HH:mm'),
+              fullTime: record.date
+            })
+          })
+        
+        const sortedDates = Object.keys(dailyData).sort()
+        chartData = sortedDates.map((dateKey, index) => {
+          const dayData = dailyData[dateKey]
+          
+          // Get average AQI for this day
+          const avgAqi = dayData.records.length > 0
+            ? Math.round(dayData.records.reduce((sum, r) => sum + r.aqi, 0) / dayData.records.length)
+            : 0
+          
+          // Get the time when AQI was recorded (use the record with closest AQI to average, or first record)
+          const closestRecord = dayData.records.reduce((closest, record) => {
+            if (!closest) return record
+            return Math.abs(record.aqi - avgAqi) < Math.abs(closest.aqi - avgAqi) ? record : closest
+          }, null)
+          
+          const timeStr = closestRecord ? closestRecord.time : format(dayData.date, 'HH:mm')
+          
+          return {
+            day: (index + 1).toString(),
+            time: timeStr,
+            timeMinutes: timeToMinutes(timeStr),
+            aqi: avgAqi,
+            fullTime: dateKey,
+            dayNumber: index + 1
+          }
+        })
+      }
+
+      setTimeChartData(chartData)
+    } catch (err) {
+      console.error('Error fetching time chart data:', err)
+      setTimeChartData([])
+    } finally {
+      setLoadingTimeChart(false)
+    }
+  }
+
+  // Fetch data when view mode changes
+  useEffect(() => {
+    if (showAnalysis && (drawnGeometry || uploadedKML)) {
+      let geometry = drawnGeometry
+      if (!geometry && uploadedKML) {
+        geometry = parseKMLToGeometry(uploadedKML.content)
+      }
+
+      if (geometry) {
+        const center = calculateGeometryCenter(geometry)
+        if (center) {
+          // Set loading state when view mode changes
+          setLoadingChart(true)
+          setLoadingTimeChart(true)
+          Promise.all([
+            fetchDataForMode(center.latitude, center.longitude),
+            fetchAQIChartData(center.latitude, center.longitude),
+            fetchTimeChartData(center.latitude, center.longitude)
+          ])
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode])
 
   return (
     <div className="dashboard">
@@ -565,7 +1215,7 @@ const Dashboard = () => {
                 <button 
                   className="nav-arrow-button"
                   onClick={handlePreviousDate}
-                  disabled={!canGoPrevious()}
+                  disabled={!canGoPrevious() || viewMode !== 'live'}
                   title="Previous Date"
                 >
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -576,19 +1226,59 @@ const Dashboard = () => {
                 <div className="current-date-display">
                   <div className="date-label">Viewing Date</div>
                   <div className="date-value">
-                    {currentViewDate ? format(new Date(currentViewDate), 'MMM dd, yyyy') : 'N/A'}
+                    {viewMode === 'live' && currentViewDate 
+                      ? format(new Date(currentViewDate), 'MMM dd, yyyy') 
+                      : viewMode === 'daily' 
+                        ? 'Last 24 Hours'
+                        : viewMode === 'weekly'
+                          ? 'Past 7 Days'
+                          : viewMode === 'monthly'
+                            ? 'Past 30 Days'
+                            : 'N/A'}
                   </div>
                 </div>
                 
                 <button 
                   className="nav-arrow-button"
                   onClick={handleNextDate}
-                  disabled={!canGoNext()}
+                  disabled={!canGoNext() || viewMode !== 'live'}
                   title="Next Date"
                 >
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <polyline points="9 18 15 12 9 6"></polyline>
                   </svg>
+                </button>
+              </div>
+
+              {/* View Mode Buttons */}
+              <div className="view-mode-buttons">
+                <button
+                  className={`view-mode-button ${viewMode === 'live' ? 'active' : ''}`}
+                  onClick={() => handleViewModeChange('live')}
+                  disabled={loading}
+                >
+                  Live
+                </button>
+                <button
+                  className={`view-mode-button ${viewMode === 'daily' ? 'active' : ''}`}
+                  onClick={() => handleViewModeChange('daily')}
+                  disabled={loading}
+                >
+                  Daily
+                </button>
+                <button
+                  className={`view-mode-button ${viewMode === 'weekly' ? 'active' : ''}`}
+                  onClick={() => handleViewModeChange('weekly')}
+                  disabled={loading}
+                >
+                  Weekly
+                </button>
+                <button
+                  className={`view-mode-button ${viewMode === 'monthly' ? 'active' : ''}`}
+                  onClick={() => handleViewModeChange('monthly')}
+                  disabled={loading}
+                >
+                  Monthly
                 </button>
               </div>
 
@@ -605,7 +1295,7 @@ const Dashboard = () => {
                   endDate={endDate}
                   date={currentViewDate} 
                   data={weatherData}
-                  isLive={currentViewDate && isToday(new Date(currentViewDate))}
+                  isLive={viewMode === 'live'}
                   loading={loading}
                 />
                 <AQISection
@@ -614,9 +1304,269 @@ const Dashboard = () => {
                   endDate={endDate} 
                   date={currentViewDate} 
                   data={aqiData}
-                  isLive={currentViewDate && isToday(new Date(currentViewDate))}
+                  isLive={viewMode === 'live'}
                   loading={loading}
                 />
+
+                {/* AQI Chart */}
+                <div className="aqi-chart-container">
+                  <div className="chart-header">
+                    <h3 className="chart-title">AQI Trend</h3>
+                    <div className="chart-header-right">
+                      <div className="chart-mode-indicator">
+                        {viewMode === 'live' && <span>Last 1 Hour</span>}
+                        {viewMode === 'daily' && <span>Last 24 Hours</span>}
+                        {viewMode === 'weekly' && <span>Last 7 Days</span>}
+                        {viewMode === 'monthly' && <span>Last 30 Days</span>}
+                      </div>
+                      <button 
+                        className="chart-refresh-button"
+                        onClick={handleRefreshAQIChart}
+                        disabled={loadingChart || !showAnalysis}
+                        title="Refresh AQI Trend Chart"
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path>
+                          <path d="M21 3v5h-5"></path>
+                          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path>
+                          <path d="M3 21v-5h5"></path>
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {loadingChart ? (
+                    <div className="chart-loading">
+                      <div className="loading-spinner"></div>
+                      <p className="loading-message">Please wait, data is loading...</p>
+                    </div>
+                  ) : aqiChartData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={400}>
+                      <LineChart 
+                        data={aqiChartData} 
+                        margin={{ top: 10, right: 30, left: 0, bottom: viewMode === 'weekly' ? 60 : 40 }}
+                      >
+                        {/* AQI Category Background Sections - Render before grid so they appear behind */}
+                        {/* Good: 0-50 (Green) */}
+                        <ReferenceArea 
+                          y1={0} 
+                          y2={50} 
+                          fill="#10b981" 
+                          fillOpacity={0.25}
+                          stroke="none"
+                        />
+                        {/* Moderate: 51-100 (Orange) */}
+                        <ReferenceArea 
+                          y1={50} 
+                          y2={100} 
+                          fill="#f59e0b" 
+                          fillOpacity={0.25}
+                          stroke="none"
+                        />
+                        {/* Poor: 101-150 (Dark Orange/Brown) */}
+                        <ReferenceArea 
+                          y1={100} 
+                          y2={150} 
+                          fill="#f97316" 
+                          fillOpacity={0.25}
+                          stroke="none"
+                        />
+                        {/* Unhealthy: 151-200 (Red) */}
+                        <ReferenceArea 
+                          y1={150} 
+                          y2={200} 
+                          fill="#ef4444" 
+                          fillOpacity={0.25}
+                          stroke="none"
+                        />
+                        {/* Severe: 201-300 (Purple) */}
+                        <ReferenceArea 
+                          y1={200} 
+                          y2={300} 
+                          fill="#8b5cf6" 
+                          fillOpacity={0.25}
+                          stroke="none"
+                        />
+                        {/* Hazardous: 301+ (Dark Red) */}
+                        <ReferenceArea 
+                          y1={300} 
+                          y2={400} 
+                          fill="#7f1d1d" 
+                          fillOpacity={0.25}
+                          stroke="none"
+                        />
+                        
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(20, 184, 166, 0.2)" />
+                        
+                        <XAxis 
+                          dataKey="time" 
+                          stroke="#9ca3af"
+                          style={{ fontSize: '11px' }}
+                          angle={viewMode === 'weekly' ? -45 : viewMode === 'monthly' ? -45 : 0}
+                          textAnchor={viewMode === 'weekly' ? 'end' : viewMode === 'monthly' ? 'end' : 'middle'}
+                          height={viewMode === 'weekly' ? 70 : viewMode === 'monthly' ? 60 : 40}
+                          interval={viewMode === 'live' ? 4 : viewMode === 'daily' ? 2 : viewMode === 'weekly' ? 0 : viewMode === 'monthly' ? 2 : 0}
+                        />
+                        <YAxis 
+                          stroke="#9ca3af"
+                          style={{ fontSize: '12px' }}
+                          label={{ value: 'AQI', angle: -90, position: 'insideLeft', style: { fill: '#9ca3af' } }}
+                          domain={[0, 400]}
+                          ticks={[0, 50, 100, 150, 200, 300, 400]}
+                        />
+                        <Tooltip 
+                          contentStyle={{ 
+                            backgroundColor: 'rgba(26, 31, 58, 0.95)', 
+                            border: '1px solid rgba(20, 184, 166, 0.4)',
+                            borderRadius: '8px',
+                            color: '#ffffff'
+                          }}
+                          labelStyle={{ color: '#14b8a6', fontWeight: 'bold' }}
+                          formatter={(value) => [`AQI: ${value}`, '']}
+                        />
+                        <Line 
+                          type="monotone" 
+                          dataKey="aqi" 
+                          stroke="#14b8a6"
+                          strokeWidth={2}
+                          dot={{ r: 4, fill: '#14b8a6' }}
+                          activeDot={{ r: 6, fill: '#14b8a6' }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="chart-no-data">
+                      <p>No chart data available</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Time Chart */}
+                <div className="aqi-chart-container">
+                  <div className="chart-header">
+                    <h3 className="chart-title">Time Chart</h3>
+                    <div className="chart-header-right">
+                      <div className="chart-mode-indicator">
+                        {viewMode === 'live' && <span>Last 1 Hour</span>}
+                        {viewMode === 'daily' && <span>Last 24 Hours</span>}
+                        {viewMode === 'weekly' && <span>Last 7 Days</span>}
+                        {viewMode === 'monthly' && <span>Last 30 Days</span>}
+                      </div>
+                      <button 
+                        className="chart-refresh-button"
+                        onClick={handleRefreshTimeChart}
+                        disabled={loadingTimeChart || !showAnalysis}
+                        title="Refresh Time Chart"
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path>
+                          <path d="M21 3v5h-5"></path>
+                          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path>
+                          <path d="M3 21v-5h5"></path>
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {loadingTimeChart ? (
+                    <div className="chart-loading">
+                      <div className="loading-spinner"></div>
+                      <p className="loading-message">Please wait, data is loading...</p>
+                    </div>
+                  ) : timeChartData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={400}>
+                      <BarChart 
+                        data={timeChartData} 
+                        margin={{ top: 10, right: 30, left: 0, bottom: viewMode === 'weekly' ? 60 : 40 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(20, 184, 166, 0.2)" />
+                        <XAxis 
+                          type="category"
+                          dataKey="day" 
+                          stroke="#9ca3af"
+                          style={{ fontSize: '11px' }}
+                          angle={viewMode === 'weekly' ? -45 : viewMode === 'monthly' ? -45 : 0}
+                          textAnchor={viewMode === 'weekly' ? 'end' : viewMode === 'monthly' ? 'end' : 'middle'}
+                          height={viewMode === 'weekly' ? 70 : viewMode === 'monthly' ? 60 : 40}
+                          interval={viewMode === 'live' ? 4 : viewMode === 'daily' ? 2 : viewMode === 'weekly' ? 0 : viewMode === 'monthly' ? 2 : 0}
+                          label={{ value: 'Days', position: 'insideBottom', offset: -5, style: { fill: '#9ca3af' } }}
+                        />
+                        <YAxis 
+                          type="number"
+                          dataKey="timeMinutes"
+                          stroke="#9ca3af"
+                          style={{ fontSize: '12px' }}
+                          label={{ 
+                            value: 'Time (HH:mm)', 
+                            angle: -90, 
+                            position: 'insideLeft', 
+                            style: { fill: '#9ca3af' } 
+                          }}
+                          domain={[0, 1440]}
+                          tickFormatter={(value) => minutesToTime(value)}
+                          ticks={[0, 240, 480, 720, 960, 1200, 1440]}
+                        />
+                        <Tooltip 
+                          contentStyle={{ 
+                            backgroundColor: 'rgba(26, 31, 58, 0.95)', 
+                            border: '1px solid rgba(20, 184, 166, 0.4)',
+                            borderRadius: '8px',
+                            color: '#ffffff'
+                          }}
+                          labelStyle={{ color: '#14b8a6', fontWeight: 'bold' }}
+                          formatter={(value) => {
+                            const timeStr = minutesToTime(value)
+                            return [`Time: ${timeStr}`, '']
+                          }}
+                          labelFormatter={(label) => `Day: ${label}`}
+                          content={({ active, payload, label }) => {
+                            if (active && payload && payload.length) {
+                              const data = payload[0].payload
+                              return (
+                                <div style={{
+                                  backgroundColor: 'rgba(26, 31, 58, 0.95)',
+                                  border: '1px solid rgba(20, 184, 166, 0.4)',
+                                  borderRadius: '8px',
+                                  padding: '12px',
+                                  color: '#ffffff'
+                                }}>
+                                  <p style={{ color: '#14b8a6', fontWeight: 'bold', marginBottom: '8px' }}>
+                                    Day: {label}
+                                  </p>
+                                  <p style={{ margin: '4px 0' }}>Time: {data.time}</p>
+                                  <p style={{ margin: '4px 0', color: '#14b8a6' }}>AQI: {data.aqi}</p>
+                                </div>
+                              )
+                            }
+                            return null
+                          }}
+                        />
+                        <Bar 
+                          dataKey="timeMinutes"
+                          radius={[4, 4, 0, 0]}
+                        >
+                          {timeChartData.map((entry, index) => {
+                            const getAQIColor = (aqi) => {
+                              if (aqi <= 50) return '#10b981'
+                              if (aqi <= 100) return '#f59e0b'
+                              if (aqi <= 150) return '#f97316'
+                              if (aqi <= 200) return '#ef4444'
+                              if (aqi <= 300) return '#8b5cf6'
+                              return '#7f1d1d'
+                            }
+                            return (
+                              <Cell key={`cell-${index}`} fill={getAQIColor(entry.aqi || 0)} />
+                            )
+                          })}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="chart-no-data">
+                      <p>No time chart data available</p>
+                    </div>
+                  )}
+                </div>
               </div>
 
             </div>

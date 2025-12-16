@@ -113,27 +113,27 @@ const AQISection = ({ date, data, isLive = false, loading = false, geometry, sta
         <div className="pollutant-levels">
           <div className="pollutant-item">
             <span className="pollutant-label">PM2.5</span>
-            <span className="pollutant-value">{aqiData.pm25} µg/m³</span>
+            <span className="pollutant-value">{aqiData.pm25.toFixed(2)} µg/m³</span>
           </div>
           <div className="pollutant-item">
             <span className="pollutant-label">PM10</span>
-            <span className="pollutant-value">{aqiData.pm10} µg/m³</span>
+            <span className="pollutant-value">{aqiData.pm10.toFixed(2)  } µg/m³</span>
           </div>
           <div className="pollutant-item">
             <span className="pollutant-label">CO</span>
-            <span className="pollutant-value">{aqiData.co} ppm</span>
+            <span className="pollutant-value">{aqiData.co.toFixed(2)} ppm</span>
           </div>
           <div className="pollutant-item">
             <span className="pollutant-label">SO₂</span>
-            <span className="pollutant-value">{aqiData.so2} µg/m³</span>
+            <span className="pollutant-value">{aqiData.so2.toFixed(2)} µg/m³</span>
           </div>
           <div className="pollutant-item">
             <span className="pollutant-label">NO₂</span>
-            <span className="pollutant-value">{aqiData.no2} µg/m³</span>
+            <span className="pollutant-value">{aqiData.no2.toFixed(2)} µg/m³</span>
           </div>
           <div className="pollutant-item">
             <span className="pollutant-label">O₃</span>
-            <span className="pollutant-value">{aqiData.o3} µg/m³</span>
+            <span className="pollutant-value">{aqiData.o3.toFixed(2)} µg/m³</span>
           </div>
         </div>
 
