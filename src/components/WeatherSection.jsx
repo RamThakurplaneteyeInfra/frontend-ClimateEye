@@ -119,19 +119,19 @@ const WeatherSection = ({ date, data, isLive = false, loading = false, geometry,
           <div className="weather-metrics">
             <div className="metric-item">
               <div className="metric-label">Feels Like</div>
-              <div className="metric-value">{weatherData.feelsLike}°C</div>
+              <div className="metric-value">{weatherData.feelsLike.toFixed(2)}°C</div>
             </div>
             <div className="metric-item">
               <div className="metric-label">Humidity</div>
-              <div className="metric-value">{weatherData.humidity}%</div>
+              <div className="metric-value">{weatherData.humidity.toFixed(2)}%</div>
             </div>
             <div className="metric-item">
               <div className="metric-label">Wind Speed</div>
-              <div className="metric-value">{weatherData.windSpeed} km/h</div>
+              <div className="metric-value">{weatherData.windSpeed.toFixed(2)} km/h</div>
             </div>
             <div className="metric-item">
               <div className="metric-label">UV Index</div>
-              <div className="metric-value">{weatherData.uvIndex}</div>
+              <div className="metric-value">{weatherData.uvIndex.toFixed(2)}</div>
             </div>
           </div>
         </div>
