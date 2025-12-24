@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { format, parseISO, startOfMonth, endOfMonth, eachDayOfInterval, isToday, isSameMonth, getMonth, getYear, startOfDay, subDays } from 'date-fns'
+import { format, parseISO, startOfMonth, endOfMonth, eachDayOfInterval, isToday, isSameMonth, getMonth, getYear, startOfDay, subDays, subMonths, addMonths } from 'date-fns'
 import { fetchMonthlyWeatherData, calculateGeometryCenter, fetchHourlyAQIDataRange, fetchHourlyAQIData } from '../services/api'
 import './MonthlyWeatherCalendar.css'
 
@@ -9,6 +9,7 @@ const MonthlyWeatherCalendar = ({ geometry, selectedDate }) => {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [coordinates, setCoordinates] = useState(null)
+  const [currentMonth, setCurrentMonth] = useState(new Date()) // Track the currently displayed month
 
   useEffect(() => {
     if (geometry) {
@@ -19,39 +20,166 @@ const MonthlyWeatherCalendar = ({ geometry, selectedDate }) => {
     }
   }, [geometry])
 
-  // Fetch data only when coordinates or month/year changes (not on every date change)
+  // Initialize current month from selectedDate or use current date
   useEffect(() => {
-    if (coordinates && selectedDate) {
+    if (selectedDate) {
+      setCurrentMonth(parseISO(selectedDate))
+    }
+  }, [selectedDate])
+
+  // Fetch data for the current month when coordinates or month changes
+  useEffect(() => {
+    if (coordinates && currentMonth) {
+      console.log(`[USE EFFECT] fetchData triggered for: ${format(currentMonth, 'MMMM yyyy')}`)
       fetchData()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [coordinates, selectedDate ? getMonth(parseISO(selectedDate)) : null, selectedDate ? getYear(parseISO(selectedDate)) : null])
+  }, [coordinates, currentMonth ? getMonth(currentMonth) : null, currentMonth ? getYear(currentMonth) : null])
 
   const fetchData = async () => {
-    if (!coordinates || !selectedDate) return
+    if (!coordinates || !currentMonth) {
+      console.log('[FETCH DATA] Missing coordinates or currentMonth, returning early')
+      return
+    }
 
+    console.log(`[FETCH DATA] Starting fetchData for: ${format(currentMonth, 'MMMM yyyy')}`)
     setLoading(true)
     setError(null)
 
+    // Check if it's a future month or older than 3 months BEFORE making any API calls
+    const today = new Date()
+    const todayYear = today.getFullYear()
+    const todayMonth = today.getMonth() + 1 // 1-12
+    const selectedYear = currentMonth.getFullYear()
+    const selectedMonth = currentMonth.getMonth() + 1 // 1-12
+    
+    // Check if selected month/year is in the future
+    const isFutureMonth = selectedYear > todayYear || 
+                         (selectedYear === todayYear && selectedMonth > todayMonth)
+
+    // Check if selected month is older than 3 months (current month + 2 previous months = 3 months total)
+    // Calculate months difference
+    const monthsDiff = (selectedYear - todayYear) * 12 + (selectedMonth - todayMonth)
+    const isOlderThan3Months = monthsDiff < -2 // -2 means 3 months ago (current month = 0, -1 = 1 month ago, -2 = 2 months ago)
+
+    console.log(`[MONTH CHECK] Selected=${selectedMonth}/${selectedYear}, Today=${todayMonth}/${todayYear}, MonthsDiff=${monthsDiff}, IsFuture=${isFutureMonth}, IsOlderThan3Months=${isOlderThan3Months}`)
+
+    // If it's a future month, show appropriate message and skip ALL API calls
+    if (isFutureMonth) {
+      console.log(`[MONTH CHECK] ✓ DETECTED FUTURE MONTH - Skipping ALL API calls for: ${format(currentMonth, 'MMMM yyyy')}`)
+      setMonthlyData({ daily_records: [], summary: null })
+      setAqiData(null)
+      setError(`No data available for ${format(currentMonth, 'MMMM yyyy')} (future month).`)
+      setLoading(false)
+      return
+    }
+
+    // If it's older than 3 months, show appropriate message and skip ALL API calls
+    if (isOlderThan3Months) {
+      console.log(`[MONTH CHECK] ✓ DETECTED OLDER THAN 3 MONTHS - Skipping ALL API calls for: ${format(currentMonth, 'MMMM yyyy')}`)
+      setMonthlyData({ daily_records: [], summary: null })
+      setAqiData(null)
+      setError(`No data available for ${format(currentMonth, 'MMMM yyyy')}. Only data for the last 3 months is available.`)
+      setLoading(false)
+      return
+    }
+    
+    console.log(`[MONTH CHECK] ✓ Month is within allowed range (last 3 months) - Proceeding with API calls for: ${format(currentMonth, 'MMMM yyyy')}`)
+
+    // Define variables that will be used in try/catch blocks
+    const monthStart = startOfMonth(currentMonth)
+
     try {
-      const date = parseISO(selectedDate)
-      const year = date.getFullYear()
-      const month = date.getMonth() + 1
+      const year = selectedYear
+      const month = selectedMonth
 
-      // Fetch weather data first
-      const weatherData = await fetchMonthlyWeatherData(coordinates.latitude, coordinates.longitude, year, month)
-      setMonthlyData(weatherData)
+      // Fetch weather data for the current month
+      let weatherData
+      try {
+        weatherData = await fetchMonthlyWeatherData(coordinates.latitude, coordinates.longitude, year, month)
+      } catch (apiError) {
+        // If API returns an error (like 404, 500, etc.), handle it gracefully
+        console.warn(`API error for ${month}/${year}:`, apiError.message)
+        
+        // Check if it's a "no data" type error (404, or message contains "not available")
+        if (apiError.message.includes('404') || 
+            apiError.message.includes('No weather data') || 
+            apiError.message.includes('not available') ||
+            apiError.message.includes('No data available')) {
+          // Set empty data structure instead of throwing error
+          setMonthlyData({ daily_records: [], summary: null })
+          setAqiData(null)
+          setError(null) // Clear error since we're handling it gracefully
+          setLoading(false)
+          return
+        }
+        
+        // Check if it's a server error for future dates or unavailable data
+        if (apiError.message.includes('500') || apiError.message.includes('Server error')) {
+          // Check if the month is in the future or very recent
+          const monthEnd = endOfMonth(currentMonth)
+          const daysFromNow = Math.floor((monthStart - today) / (1000 * 60 * 60 * 24))
+          
+          if (daysFromNow > 0) {
+            // Future month
+            setMonthlyData({ daily_records: [], summary: null })
+            setAqiData(null)
+            setError(`No data available for ${format(currentMonth, 'MMMM yyyy')} (future month).`)
+            setLoading(false)
+            return
+          }
+        }
+        
+        // For other errors, throw to be caught by outer catch
+        throw apiError
+      }
+      
+      // Validate and clean the weather data
+      if (weatherData && weatherData.daily_records) {
+        // Clean any NaN or invalid values from daily records
+        const cleanedRecords = weatherData.daily_records.map(record => {
+          const cleaned = { ...record }
+          // Replace NaN or invalid values with null
+          Object.keys(cleaned).forEach(key => {
+            if (typeof cleaned[key] === 'number' && (isNaN(cleaned[key]) || !isFinite(cleaned[key]))) {
+              cleaned[key] = null
+            }
+          })
+          // Ensure date is normalized to yyyy-MM-dd format for consistent matching
+          if (cleaned.date) {
+            try {
+              const recordDate = parseISO(cleaned.date)
+              cleaned.date = format(startOfDay(recordDate), 'yyyy-MM-dd')
+            } catch (e) {
+              // If parsing fails, keep original date
+              console.warn(`Could not parse date: ${cleaned.date}`, e)
+            }
+          }
+          return cleaned
+        })
+        
+        console.log(`[WEATHER DATA] Processed ${cleanedRecords.length} records`)
+        if (cleanedRecords.length > 0) {
+          console.log(`[WEATHER DATA] First date: ${cleanedRecords[0]?.date}, Last date: ${cleanedRecords[cleanedRecords.length - 1]?.date}`)
+        }
+        setMonthlyData({ ...weatherData, daily_records: cleanedRecords })
+      } else {
+        setMonthlyData(weatherData || { daily_records: [] })
+      }
 
-      // Try to fetch AQI data - first try range endpoint, then fallback to day-by-day
-      const monthStart = startOfMonth(date)
-      const monthEnd = endOfMonth(date)
-      const today = new Date()
-      const todayStr = format(today, 'yyyy-MM-dd')
+      // Fetch AQI data for the current month
+      const monthEnd = endOfMonth(currentMonth)
+      const monthEndDate = startOfDay(monthEnd) // Normalize to start of day
       
       // Only fetch up to today (don't fetch future dates)
-      const endDate = today < monthEnd ? today : monthEnd
+      // Use startOfDay to ensure we include the full last day if it's in the past
+      const todayStart = startOfDay(today)
+      const endDate = todayStart < monthEndDate ? todayStart : monthEndDate
       const startDateStr = format(monthStart, 'yyyy-MM-dd')
       const endDateStr = format(endDate, 'yyyy-MM-dd')
+      
+      console.log(`[DATE RANGE] Fetching AQI data from ${startDateStr} to ${endDateStr}`)
+      console.log(`[DATE RANGE] monthEnd: ${format(monthEndDate, 'yyyy-MM-dd')}, today: ${format(todayStart, 'yyyy-MM-dd')}, endDate: ${format(endDate, 'yyyy-MM-dd')}`)
 
       let aqiRangeData = null
       try {
@@ -59,17 +187,15 @@ const MonthlyWeatherCalendar = ({ geometry, selectedDate }) => {
         aqiRangeData = await fetchHourlyAQIDataRange(coordinates.latitude, coordinates.longitude, startDateStr, endDateStr)
         console.log('AQI Range endpoint succeeded, records:', aqiRangeData?.hourly_records?.length || 0)
       } catch (err) {
-        console.warn('AQI Range endpoint failed (500 error), trying day-by-day fetch:', err.message)
+        console.warn('AQI Range endpoint failed, trying day-by-day fetch:', err.message)
         // Fallback: Fetch day by day for days in the month up to today
         const allDays = eachDayOfInterval({ start: monthStart, end: endDate })
         const aqiPromises = []
         
         console.log(`Fetching AQI for ${allDays.length} days (from ${startDateStr} to ${endDateStr})...`)
         
-        // Fetch for each day in the month (up to today)
         for (const dayDate of allDays) {
           const dayStr = format(dayDate, 'yyyy-MM-dd')
-          // Don't fetch future dates
           if (dayDate <= today) {
             aqiPromises.push(
               fetchHourlyAQIData(coordinates.latitude, coordinates.longitude, dayStr)
@@ -91,10 +217,9 @@ const MonthlyWeatherCalendar = ({ geometry, selectedDate }) => {
         }
         
         const aqiResults = await Promise.all(aqiPromises)
-        // Combine all hourly records
         const allRecords = []
         let successCount = 0
-        aqiResults.forEach((result, index) => {
+        aqiResults.forEach(result => {
           if (result && result.records && result.records.length > 0) {
             allRecords.push(...result.records)
             successCount++
@@ -110,7 +235,7 @@ const MonthlyWeatherCalendar = ({ geometry, selectedDate }) => {
           console.log('No AQI records found in day-by-day fetch. Check if API has data for these dates.')
         }
       }
-      
+
       // Process AQI data to find highest AQI for each day
       if (aqiRangeData && aqiRangeData.hourly_records) {
         console.log('AQI Records received:', aqiRangeData.hourly_records.length)
@@ -131,18 +256,133 @@ const MonthlyWeatherCalendar = ({ geometry, selectedDate }) => {
           }
         })
         console.log('Daily Max AQI processed:', dailyMaxAQI)
-        console.log('Sample dates:', Object.keys(dailyMaxAQI).slice(0, 5))
         setAqiData(dailyMaxAQI)
       } else {
         console.log('No AQI data available')
         setAqiData(null)
       }
     } catch (err) {
-      setError(err.message)
+      // Re-check if it's a future month or older than 3 months (in case the initial check was bypassed somehow)
+      const today = new Date()
+      const todayYear = today.getFullYear()
+      const todayMonth = today.getMonth() + 1
+      const selectedYear = currentMonth.getFullYear()
+      const selectedMonth = currentMonth.getMonth() + 1
+      const isFutureMonthInCatch = selectedYear > todayYear || 
+                                   (selectedYear === todayYear && selectedMonth > todayMonth)
+      const monthsDiff = (selectedYear - todayYear) * 12 + (selectedMonth - todayMonth)
+      const isOlderThan3MonthsInCatch = monthsDiff < -2
+      
+      // Provide more helpful error messages
+      let errorMessage = err.message
+      const monthYear = format(currentMonth, 'MMMM yyyy')
+      
+      // If it's a future month, ALWAYS show future month message (highest priority)
+      // This handles cases where the API was called despite the initial check
+      if (isFutureMonthInCatch) {
+        console.log(`[CATCH BLOCK] Detected future month in error handler: ${monthYear}`)
+        errorMessage = `No data available for ${monthYear} (future month).`
+      } else if (isOlderThan3MonthsInCatch) {
+        console.log(`[CATCH BLOCK] Detected older than 3 months in error handler: ${monthYear}`)
+        errorMessage = `No data available for ${monthYear}. Only data for the last 3 months is available.`
+      } else if (err.message.includes('JSON') || err.message.includes('NaN')) {
+        errorMessage = `Unable to load data for ${monthYear}. The API returned invalid data. Please try a different month.`
+      } else if (err.message.includes('404') || err.message.includes('Not Found') || err.message.includes('No weather data')) {
+        errorMessage = `No data available for ${monthYear}.`
+      } else if (err.message.includes('500') || err.message.includes('Server error')) {
+        // Check if it might be a future month causing server error
+        // Use the same logic as the initial check
+        if (isFutureMonthInCatch) {
+          errorMessage = `No data available for ${monthYear} (future month).`
+        } else {
+          errorMessage = `Server error while loading data for ${monthYear}. Please try again later.`
+        }
+      } else if (err.message.includes('400') || err.message.includes('Invalid request')) {
+        errorMessage = `Invalid request for ${monthYear}. Please check the date.`
+      } else if (err.message.includes('503') || err.message.includes('unavailable')) {
+        errorMessage = `Service temporarily unavailable for ${monthYear}. Please try again later.`
+      } else if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
+        errorMessage = `Network error while loading data for ${monthYear}. Please check your connection.`
+      } else {
+        // Generic error message
+        errorMessage = `Error loading data for ${monthYear}: ${err.message}`
+      }
+      
+      setError(errorMessage)
       console.error('Error fetching monthly weather data:', err)
+      // Set empty data instead of null to prevent rendering issues
+      setMonthlyData({ daily_records: [] })
+      setAqiData(null)
     } finally {
       setLoading(false)
     }
+  }
+
+  const handlePreviousMonth = () => {
+    const newMonth = subMonths(currentMonth, 1)
+    const today = new Date()
+    const todayYear = today.getFullYear()
+    const todayMonth = today.getMonth() + 1
+    const newYear = newMonth.getFullYear()
+    const newMonthNum = newMonth.getMonth() + 1
+    
+    // Calculate months difference
+    const monthsDiff = (newYear - todayYear) * 12 + (newMonthNum - todayMonth)
+    
+    // Only allow going back 2 months (current month = 0, -1 = 1 month ago, -2 = 2 months ago)
+    if (monthsDiff >= -2) {
+      setCurrentMonth(newMonth)
+    } else {
+      console.log(`[NAVIGATION] Cannot go back further than 3 months. MonthsDiff: ${monthsDiff}`)
+    }
+  }
+
+  const handleNextMonth = () => {
+    const newMonth = addMonths(currentMonth, 1)
+    const today = new Date()
+    const todayYear = today.getFullYear()
+    const todayMonth = today.getMonth() + 1
+    const newYear = newMonth.getFullYear()
+    const newMonthNum = newMonth.getMonth() + 1
+    
+    // Check if it's a future month
+    const isFutureMonth = newYear > todayYear || 
+                          (newYear === todayYear && newMonthNum > todayMonth)
+    
+    // Only allow going to current month or future (but future will show error)
+    if (!isFutureMonth || newYear === todayYear && newMonthNum === todayMonth) {
+      setCurrentMonth(newMonth)
+    } else {
+      console.log(`[NAVIGATION] Cannot go to future months beyond current month`)
+    }
+  }
+
+  // Check if Previous button should be disabled (at 3-month limit)
+  const canGoPrevious = () => {
+    if (!currentMonth) return false
+    const today = new Date()
+    const todayYear = today.getFullYear()
+    const todayMonth = today.getMonth() + 1
+    const selectedYear = currentMonth.getFullYear()
+    const selectedMonth = currentMonth.getMonth() + 1
+    
+    const monthsDiff = (selectedYear - todayYear) * 12 + (selectedMonth - todayMonth)
+    // Can go previous if monthsDiff > -2 (not at the 3-month limit yet)
+    return monthsDiff > -2
+  }
+
+  // Check if Next button should be disabled (at current month)
+  const canGoNext = () => {
+    if (!currentMonth) return false
+    const today = new Date()
+    const todayYear = today.getFullYear()
+    const todayMonth = today.getMonth() + 1
+    const selectedYear = currentMonth.getFullYear()
+    const selectedMonth = currentMonth.getMonth() + 1
+    
+    // Can go next if not at current month yet
+    return selectedYear < todayYear || 
+           (selectedYear === todayYear && selectedMonth < todayMonth)
   }
 
   // Get AQI color based on value
@@ -241,17 +481,28 @@ const MonthlyWeatherCalendar = ({ geometry, selectedDate }) => {
     )
   }
 
-  if (!monthlyData || !monthlyData.daily_records) {
+  if (!monthlyData) {
     return null
   }
 
-  const date = parseISO(selectedDate)
-  const monthStart = startOfMonth(date)
-  const monthEnd = endOfMonth(date)
+  // Handle case where daily_records might be empty or undefined
+  if (!monthlyData.daily_records || monthlyData.daily_records.length === 0) {
+    return (
+      <div className="monthly-weather-calendar">
+        <div className="error-message">
+          <p>No weather data available for {format(currentMonth, 'MMMM yyyy')}.</p>
+        </div>
+      </div>
+    )
+  }
+
+  const monthStart = startOfMonth(currentMonth)
+  const monthEnd = endOfMonth(currentMonth)
   const allDays = eachDayOfInterval({ start: monthStart, end: monthEnd })
-  
-  // Get first day of week for the month start
   const firstDayOfWeek = monthStart.getDay()
+  
+  const weekDays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  const monthName = format(currentMonth, 'MMMM yyyy')
   
   // Create calendar grid
   const calendarDays = []
@@ -261,63 +512,67 @@ const MonthlyWeatherCalendar = ({ geometry, selectedDate }) => {
     calendarDays.push(null)
   }
   
-  // Find the last day that has data
-  let lastDayWithData = null
-  if (monthlyData.daily_records && monthlyData.daily_records.length > 0) {
-    const datesWithData = monthlyData.daily_records
-      .map(r => parseISO(r.date))
-      .filter(d => isSameMonth(d, date))
-      .sort((a, b) => b - a) // Sort descending
-    if (datesWithData.length > 0) {
-      lastDayWithData = datesWithData[0]
-    }
-  }
-  
-  // Add all days of the month, but stop at the last day with data (removes trailing empty days like 30)
+  // Add all days of the month
   allDays.forEach(day => {
-    // If we've found a last day with data and this day is after it, skip it
-    if (lastDayWithData && day > lastDayWithData) {
-      return
+    // Normalize the day to start of day for consistent matching
+    const normalizedDay = startOfDay(day)
+    const dayStr = format(normalizedDay, 'yyyy-MM-dd')
+    
+    // Try to find record - check both exact match and normalized date
+    let record = monthlyData.daily_records.find(r => {
+      if (!r || !r.date) return false
+      // Normalize the record date for comparison
+      try {
+        const recordDate = parseISO(r.date)
+        const normalizedRecordDate = startOfDay(recordDate)
+        const recordDateStr = format(normalizedRecordDate, 'yyyy-MM-dd')
+        return recordDateStr === dayStr
+      } catch (e) {
+        // Fallback to string comparison
+        return r.date === dayStr || r.date.startsWith(dayStr)
+      }
+    }) || null
+    
+    // Debug logging for last day of month
+    if (day.getDate() === monthEnd.getDate() && day.getMonth() === monthEnd.getMonth()) {
+      console.log(`[LAST DAY DEBUG] Day: ${dayStr}, Found record:`, record ? 'YES' : 'NO')
+      console.log(`[LAST DAY DEBUG] Available dates in daily_records:`, monthlyData.daily_records.map(r => r.date).slice(-5))
     }
     
-    const dayStr = format(day, 'yyyy-MM-dd')
-    const record = monthlyData.daily_records.find(r => r.date === dayStr)
     calendarDays.push({
-      date: day,
-      record: record || null
+      date: normalizedDay,
+      record: record
     })
   })
 
-  const weekDays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-  const monthName = format(date, 'MMMM yyyy')
-
-  // Remove trailing empty cells after the last day of the month
-  // Find the index of the last day that belongs to the current month
-  let lastValidIndex = -1
-  for (let i = calendarDays.length - 1; i >= 0; i--) {
-    if (calendarDays[i] && isSameMonth(calendarDays[i].date, date)) {
-      lastValidIndex = i
-      break
-    }
-  }
-  
-  // Only include days up to the last day of the month (no empty cells after)
-  // Slice to include only up to the last valid day
-  let trimmedCalendarDays = lastValidIndex >= 0 
-    ? calendarDays.slice(0, lastValidIndex + 1)
-    : calendarDays
-  
-  // Calculate which cells should be hidden (empty cells after the last day)
-  // Find the position of the last day in the grid (0-indexed)
-  const lastDayPosition = trimmedCalendarDays.length - 1
-  const lastDayRow = Math.floor(lastDayPosition / 7)
-  const lastDayCol = lastDayPosition % 7
-  
-  // Calculate how many cells are in the last row after the last day
-  const cellsToHide = 6 - lastDayCol // 6 because we want to hide cells after the last day (0-6 columns)
-
   return (
     <div className="monthly-weather-calendar">
+      <div className="calendar-header">
+        <button 
+          className={`month-nav-button prev ${!canGoPrevious() ? 'disabled' : ''}`} 
+          onClick={handlePreviousMonth}
+          disabled={!canGoPrevious()}
+          title={!canGoPrevious() ? 'Only data for the last 3 months is available' : 'Previous Month'}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+          Previous Month
+        </button>
+        <h2 className="calendar-title">{monthName}</h2>
+        <button 
+          className={`month-nav-button next ${!canGoNext() ? 'disabled' : ''}`} 
+          onClick={handleNextMonth}
+          disabled={!canGoNext()}
+          title={!canGoNext() ? 'Already at current month' : 'Next Month'}
+        >
+          Next Month
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M9 18l6-6-6-6"/>
+          </svg>
+        </button>
+      </div>
+      
       <div className="calendar-grid">
         <div className="calendar-weekdays">
           {weekDays.map(day => (
@@ -326,15 +581,7 @@ const MonthlyWeatherCalendar = ({ geometry, selectedDate }) => {
         </div>
         
         <div className="calendar-days">
-          {trimmedCalendarDays.map((dayData, index) => {
-            const isLastRow = Math.floor(index / 7) === lastDayRow
-            const isAfterLastDay = isLastRow && (index % 7) > lastDayCol
-            
-            // Don't render empty cells after the last day of the month
-            if (isAfterLastDay) {
-              return null
-            }
-            
+          {calendarDays.map((dayData, index) => {
             // Render empty cells for days before month starts
             if (!dayData) {
               return <div key={`empty-${index}`} className="calendar-day empty"></div>
@@ -345,19 +592,8 @@ const MonthlyWeatherCalendar = ({ geometry, selectedDate }) => {
             const dayStr = format(startOfDay(dayDate), 'yyyy-MM-dd')
             const dayAQI = aqiData && aqiData[dayStr] !== undefined ? aqiData[dayStr] : null
             
-            // Debug: log first few days
-            if (dayDate.getDate() <= 3 && aqiData) {
-              console.log('Looking up AQI for day:', {
-                day: dayDate.getDate(),
-                dayStr: dayStr,
-                dayAQI: dayAQI,
-                availableKeys: Object.keys(aqiData).slice(0, 5),
-                matchFound: aqiData[dayStr] !== undefined
-              })
-            }
-            
             // Only render if it's a valid day of the current month
-            if (!isSameMonth(dayDate, date)) {
+            if (!isSameMonth(dayDate, currentMonth)) {
               return null
             }
             
@@ -373,11 +609,11 @@ const MonthlyWeatherCalendar = ({ geometry, selectedDate }) => {
               >
                 <div className="day-number">{dayDate.getDate()}</div>
                 {dayAQI !== null && dayAQI !== undefined ? (
-                  <div className="aqi-value" style={{ color: aqiColor , fontSize: '1rem'}}>
+                  <div className="aqi-value" style={{ color: aqiColor, fontSize: '1rem' }}>
                     AQI: {Math.round(dayAQI)}
                   </div>
                 ) : (
-                  <div className="aqi-value" style={{ color: '#9ca3af', opacity: 0.6 , fontSize: '1rem'}}>
+                  <div className="aqi-value" style={{ color: '#9ca3af', opacity: 0.6, fontSize: '1rem' }}>
                     AQI: -
                   </div>
                 )}
@@ -392,7 +628,7 @@ const MonthlyWeatherCalendar = ({ geometry, selectedDate }) => {
                     </div>
                   </>
                 ) : (
-                  <div className="no-data">-</div>
+                  <div className="no-data">Data not available</div>
                 )}
               </div>
             )
@@ -401,7 +637,6 @@ const MonthlyWeatherCalendar = ({ geometry, selectedDate }) => {
       </div>
       
       <div className="calendar-footer">
-        <h2 className="calendar-title">{monthName} Weather Forecast</h2>
         {monthlyData.summary && (
           <div className="month-summary">
             <span className="summary-item sunny">{monthlyData.summary.sunny} Sunny</span>

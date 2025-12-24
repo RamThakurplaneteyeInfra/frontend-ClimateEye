@@ -269,6 +269,7 @@ const LiveDashboardCards = ({ aqiData, weatherData }) => {
         </div>
       </div>
 
+
       {/* Weather Card */}
       <div className="dashboard-card weather-card">
         <div className="card-header">

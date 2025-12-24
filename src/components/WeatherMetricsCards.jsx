@@ -283,5 +283,6 @@ const WeatherMetricsCards = ({ geometry, date, isLive = false }) => {
   )
 }
 
+
 export default WeatherMetricsCards
 

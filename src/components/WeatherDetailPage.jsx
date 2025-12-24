@@ -227,6 +227,7 @@ const WeatherDetailPage = () => {
         </div>
       </div>
 
+
       {/* Monthly Weather Calendar */}
       {coordinates && (
         <MonthlyWeatherCalendar geometry={geometry} selectedDate={selectedDate} />

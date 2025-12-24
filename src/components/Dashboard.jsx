@@ -1509,6 +1509,7 @@ const Dashboard = () => {
                     </div>
                   </div>
                   
+                  
                   {loadingTimeChart ? (
                     <div className="chart-loading">
                       <div className="loading-spinner"></div>

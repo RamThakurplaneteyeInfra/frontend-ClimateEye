@@ -1100,4 +1100,5 @@ const AQIDetailPage = () => {
   )
 }
 
+
 export default AQIDetailPage

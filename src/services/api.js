@@ -187,14 +187,75 @@ export const fetchMonthlyWeatherData = async (latitude, longitude, year, month) 
       })
     })
 
+    
+    // Get response as text first to handle NaN values and error messages
+    const text = await response.text()
+    
+    // If response is not ok, try to parse error message from response
     if (!response.ok) {
-      throw new Error(`Monthly Weather API error: ${response.statusText}`)
+      let errorMessage = `Monthly Weather API error: ${response.status} ${response.statusText}`
+      try {
+        const errorData = JSON.parse(text)
+        if (errorData.message || errorData.error) {
+          errorMessage = errorData.message || errorData.error || errorMessage
+        }
+      } catch (e) {
+        // If we can't parse error, use the text or default message
+        if (text && text.length < 200) {
+          errorMessage = text
+        }
+      }
+      
+      // Provide more specific error messages based on status code
+      if (response.status === 404) {
+        errorMessage = `No weather data available for ${month}/${year}`
+      } else if (response.status === 400) {
+        errorMessage = `Invalid request for ${month}/${year}. Please check the date.`
+      } else if (response.status === 500) {
+        errorMessage = `Server error while fetching data for ${month}/${year}. Please try again later.`
+      } else if (response.status === 503) {
+        errorMessage = `Service temporarily unavailable for ${month}/${year}. Please try again later.`
+      }
+      
+      throw new Error(errorMessage)
     }
 
-    const data = await response.json()
-    return data
+    // Replace NaN values with null to make valid JSON
+    const sanitizedText = text.replace(/:\s*NaN/g, ': null').replace(/:\s*-?Infinity/g, ': null')
+    
+    let data
+    try {
+      data = JSON.parse(sanitizedText)
+    } catch (parseError) {
+      console.error('Error parsing JSON response:', parseError)
+      console.error('Response text:', text.substring(0, 500))
+      throw new Error(`Invalid JSON response from API: ${parseError.message}`)
+    }
+
+    // Recursively clean any remaining NaN or Infinity values in the parsed data
+    const cleanData = (obj) => {
+      if (obj === null || obj === undefined) return obj
+      if (typeof obj === 'number' && (isNaN(obj) || !isFinite(obj))) return null
+      if (Array.isArray(obj)) return obj.map(cleanData)
+      if (typeof obj === 'object') {
+        const cleaned = {}
+        for (const key in obj) {
+          if (obj.hasOwnProperty(key)) {
+            cleaned[key] = cleanData(obj[key])
+          }
+        }
+        return cleaned
+      }
+      return obj
+    }
+
+    return cleanData(data)
   } catch (error) {
-    console.error('Error fetching monthly weather data:', error)
+    console.error(`Error fetching monthly weather data for ${month}/${year}:`, error)
+    // Re-throw with more context if it's not already a formatted error
+    if (error.message && !error.message.includes('Monthly Weather API error')) {
+      throw new Error(`Failed to fetch weather data for ${month}/${year}: ${error.message}`)
+    }
     throw error
   }
 }
