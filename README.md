@@ -9,7 +9,6 @@ A modern environmental monitoring dashboard with dark theme and teal accents.
 - **Modern UI**: Dark theme with teal accents matching ANDROMEDA style
 - **Responsive Design**: Clean and intuitive interface
 
-
 ## Installation
 
 1. Navigate to the frontend directory:
