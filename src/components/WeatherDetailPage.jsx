@@ -232,13 +232,13 @@ const WeatherDetailPage = () => {
       {/* Monthly Weather Calendar or Hourly AQI Cards */}
       {coordinates && (
         dailyMode ? (
-          // <HourlyAQICards 
-          //   geometry={geometry} 
-          //   date={selectedDate}
-          // />
-          <div>
-            <h1>Hourly AQI Cards</h1>
-          </div>
+          <HourlyAQICards 
+            geometry={geometry} 
+            date={selectedDate}
+          />
+          // <div>
+          //   <h1>Hourly AQI Cards</h1>
+          // </div>
         ) : (
           <MonthlyWeatherCalendar 
             geometry={geometry} 
